@@ -1,0 +1,13 @@
+{
+  "name": "voice-claude",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A spoken front end to Claude Code, for reviewing and steering code while driving.",
+  "scripts": {
+    "start": "node server/index.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

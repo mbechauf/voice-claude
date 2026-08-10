@@ -1,0 +1,198 @@
+// The Mac side. Serves the phone page, mints a short-lived voice credential so the
+// real key never leaves this machine, and hands work to Claude.
+
+import http from "node:http";
+import https from "node:https";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import { networkInterfaces } from "node:os";
+
+import { PORT, PROJECT_DIR, VOICE_MODEL, VOICE_NAME } from "./config.mjs";
+import { startWork, stopWork } from "./claude-bridge.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.join(here, "..");
+
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_KEY) {
+  console.error("OPENAI_API_KEY is not set. Set it and try again.");
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------- listeners
+
+const listeners = new Set();
+
+function broadcast(kind, text) {
+  const payload = `data: ${JSON.stringify({ kind, text })}\n\n`;
+  for (const res of listeners) res.write(payload);
+}
+
+// ------------------------------------------------------------------ helpers
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(data || "{}"));
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+function send(res, status, body, type = "application/json") {
+  res.writeHead(status, { "content-type": type, "access-control-allow-origin": "*" });
+  res.end(typeof body === "string" ? body : JSON.stringify(body));
+}
+
+// A short-lived credential for the browser, so the real key stays here.
+async function mintVoiceToken() {
+  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${OPENAI_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      session: {
+        type: "realtime",
+        model: VOICE_MODEL,
+        audio: { output: { voice: VOICE_NAME } },
+      },
+    }),
+  });
+
+  const text = await response.text();
+  if (!response.ok) throw new Error(`voice token refused: ${response.status} ${text}`);
+
+  const data = JSON.parse(text);
+  // The field has moved around between versions; accept either shape.
+  const secret = data.value ?? data.client_secret?.value ?? data.client_secret;
+  if (!secret) throw new Error(`no credential in response: ${text}`);
+  return secret;
+}
+
+// --------------------------------------------------------------- the routes
+
+async function handle(req, res) {
+  const url = new URL(req.url, "http://localhost");
+
+  if (url.pathname === "/" || url.pathname === "/index.html") {
+    const html = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+    return send(res, 200, html, "text/html; charset=utf-8");
+  }
+
+  if (url.pathname === "/instructions") {
+    const text = fs.readFileSync(path.join(here, "voice-instructions.md"), "utf8");
+    return send(res, 200, text, "text/plain; charset=utf-8");
+  }
+
+  if (url.pathname === "/token" && req.method === "POST") {
+    try {
+      return send(res, 200, { secret: await mintVoiceToken(), model: VOICE_MODEL });
+    } catch (err) {
+      console.error(err);
+      return send(res, 500, { error: String(err.message ?? err) });
+    }
+  }
+
+  if (url.pathname === "/ask" && req.method === "POST") {
+    const { request } = await readBody(req);
+    if (!request) return send(res, 400, { error: "no request" });
+    console.log(`\n→ ${request}`);
+    startWork(request, (kind, text) => {
+      console.log(`  ${kind}: ${text.slice(0, 120)}`);
+      broadcast(kind, text);
+    });
+    return send(res, 202, { started: true });
+  }
+
+  if (url.pathname === "/stop" && req.method === "POST") {
+    const stopped = stopWork();
+    console.log(stopped ? "  stopped" : "  nothing to stop");
+    return send(res, 200, { stopped });
+  }
+
+  if (url.pathname === "/events") {
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "access-control-allow-origin": "*",
+    });
+    res.write("retry: 2000\n\n");
+    listeners.add(res);
+    const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      listeners.delete(res);
+    });
+    return;
+  }
+
+  return send(res, 404, { error: "not found" });
+}
+
+// ------------------------------------------------- certificate (for the mic)
+
+// Phones will not give a web page the microphone unless the connection is secure,
+// so we serve over HTTPS with a certificate this machine signs itself. Safari will
+// warn once on the phone; accept it and it stays accepted.
+function ensureCertificate() {
+  const dir = path.join(root, ".cert");
+  const keyPath = path.join(dir, "key.pem");
+  const certPath = path.join(dir, "cert.pem");
+
+  if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+  }
+
+  fs.mkdirSync(dir, { recursive: true });
+  const addresses = localAddresses();
+  const alt = ["IP:127.0.0.1", "DNS:localhost", ...addresses.map((a) => `IP:${a}`)].join(",");
+
+  execFileSync("openssl", [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", keyPath, "-out", certPath,
+    "-days", "825", "-subj", "/CN=voice-claude",
+    "-addext", `subjectAltName=${alt}`,
+  ]);
+
+  console.log("Made a self-signed certificate for this machine.");
+  return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+}
+
+function localAddresses() {
+  const out = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family === "IPv4" && !entry.internal) out.push(entry.address);
+    }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------- listen
+
+const creds = ensureCertificate();
+const server = https.createServer(creds, (req, res) => {
+  handle(req, res).catch((err) => {
+    console.error(err);
+    send(res, 500, { error: String(err.message ?? err) });
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`\nvoice-claude is up.`);
+  console.log(`Working on:  ${PROJECT_DIR}`);
+  console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
+  console.log(`\nOpen this on the phone, on the same wifi:`);
+  for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
+  console.log(`\nSafari will warn about the certificate the first time. Accept it.\n`);
+});

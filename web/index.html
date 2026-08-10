@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>voice-claude</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100dvh; display: flex; flex-direction: column;
+    background: #14140f; color: #f0ece2;
+    font: 16px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
+    padding: env(safe-area-inset-top) 1rem env(safe-area-inset-bottom);
+  }
+  header { padding: 1.25rem 0 0.5rem; }
+  h1 { font-size: 1.1rem; margin: 0; font-weight: 600; letter-spacing: 0.01em; }
+  #state { color: #9b968a; font-size: 0.9rem; margin-top: 0.25rem; }
+  button {
+    font: inherit; font-size: 1.35rem; font-weight: 600;
+    padding: 1.6rem; border-radius: 1rem; border: 0; width: 100%;
+    background: #c96442; color: #fff; margin: 0.75rem 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button.live { background: #3a3a32; }
+  button:disabled { opacity: 0.5; }
+  #log {
+    flex: 1; overflow-y: auto; font-size: 0.9rem;
+    border-top: 1px solid #2e2e26; padding-top: 0.75rem; margin-top: 0.25rem;
+  }
+  .line { padding: 0.3rem 0; border-bottom: 1px solid #23231d; }
+  .you { color: #8fc7a8; }
+  .work { color: #9b968a; font-style: italic; }
+  .bad { color: #e08a6a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>voice-claude</h1>
+  <div id="state">not connected</div>
+</header>
+
+<button id="go">Start talking</button>
+
+<div id="log"></div>
+
+<script type="module">
+const stateEl = document.getElementById("state");
+const logEl = document.getElementById("log");
+const goBtn = document.getElementById("go");
+
+let pc = null, dc = null, events = null, live = false;
+let lastSpokeAt = 0;
+const PROGRESS_MIN_GAP_MS = 25_000;
+
+function setState(text) { stateEl.textContent = text; }
+
+function log(text, cls = "") {
+  const div = document.createElement("div");
+  div.className = `line ${cls}`;
+  div.textContent = text;
+  logEl.append(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------------------------------------------------------- talking to the voice
+
+function sendEvent(obj) {
+  if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+}
+
+// Put something in front of the voice model and have it speak.
+function speakThrough(note) {
+  sendEvent({
+    type: "conversation.item.create",
+    item: { type: "message", role: "user", content: [{ type: "input_text", text: note }] },
+  });
+  sendEvent({ type: "response.create" });
+  lastSpokeAt = Date.now();
+}
+
+const TOOLS = [
+  {
+    type: "function",
+    name: "ask_claude",
+    description:
+      "Hand a request to Claude, which reads and reasons about the user's real code on their machine. " +
+      "Use this for ANY question or instruction about their code, project, tests, commits, or tools — " +
+      "you have no knowledge of these yourself. Returns immediately; the answer arrives later and you " +
+      "will be told to speak it.",
+    parameters: {
+      type: "object",
+      properties: {
+        request: {
+          type: "string",
+          description:
+            "What the user wants, in full, as an instruction to a capable engineer. Include anything " +
+            "from earlier in the conversation that is needed to make sense of it on its own.",
+        },
+      },
+      required: ["request"],
+    },
+  },
+  {
+    type: "function",
+    name: "stop_claude",
+    description: "Stop whatever Claude is currently doing. Use when the user says stop.",
+    parameters: { type: "object", properties: {} },
+  },
+];
+
+async function configureSession() {
+  const instructions = await (await fetch("/instructions")).text();
+  sendEvent({
+    type: "session.update",
+    session: {
+      type: "realtime",
+      instructions,
+      tools: TOOLS,
+      tool_choice: "auto",
+    },
+  });
+}
+
+function answerTool(callId, output) {
+  sendEvent({
+    type: "conversation.item.create",
+    item: { type: "function_call_output", call_id: callId, output },
+  });
+  sendEvent({ type: "response.create" });
+  lastSpokeAt = Date.now();
+}
+
+async function onVoiceEvent(event) {
+  switch (event.type) {
+    case "response.function_call_arguments.done": {
+      const args = JSON.parse(event.arguments || "{}");
+      if (event.name === "ask_claude") {
+        log(`you: ${args.request}`, "you");
+        await fetch("/ask", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ request: args.request }),
+        });
+        answerTool(event.call_id, "Started. Say one short sentence to acknowledge, then wait quietly.");
+      } else if (event.name === "stop_claude") {
+        await fetch("/stop", { method: "POST" });
+        log("stopped", "work");
+        answerTool(event.call_id, "Stopped.");
+      }
+      break;
+    }
+    case "response.done":
+      lastSpokeAt = Date.now();
+      break;
+    case "error":
+      log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
+      break;
+  }
+}
+
+// ------------------------------------------------------- results coming back
+
+function listenForResults() {
+  events = new EventSource("/events");
+  events.onmessage = (message) => {
+    const { kind, text } = JSON.parse(message.data);
+
+    if (kind === "progress") {
+      log(text, "work");
+      // Only interrupt with progress if it's been quiet for a while.
+      if (Date.now() - lastSpokeAt > PROGRESS_MIN_GAP_MS) {
+        speakThrough(`[Status update, not from the user: Claude is ${text}. Say this briefly and naturally, then wait.]`);
+      }
+      return;
+    }
+
+    if (kind === "final") {
+      log(text.slice(0, 400), "");
+      speakThrough(
+        `[Claude has finished and this is its answer. Speak it to the user following your speaking rules — ` +
+        `plain words, no code, lead with the outcome, findings one at a time. Do not read it verbatim.\n\n${text}]`
+      );
+      return;
+    }
+
+    if (kind === "error") {
+      log(text, "bad");
+      speakThrough(`[Something went wrong: ${text}. Tell the user in one plain sentence and ask what they want to do.]`);
+    }
+  };
+  events.onerror = () => setState("lost the link to the Mac — retrying");
+}
+
+// ------------------------------------------------------------------ connect
+
+async function start() {
+  goBtn.disabled = true;
+  setState("connecting…");
+
+  try {
+    const { secret, model } = await (await fetch("/token", { method: "POST" })).json();
+    if (!secret) throw new Error("no voice credential");
+
+    const mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+
+    pc = new RTCPeerConnection();
+
+    const speaker = new Audio();
+    speaker.autoplay = true;
+    pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
+
+    pc.addTrack(mic.getTracks()[0], mic);
+
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = async () => {
+      await configureSession();
+      live = true;
+      setState("listening — just talk");
+      goBtn.textContent = "Stop";
+      goBtn.className = "live";
+      goBtn.disabled = false;
+      log("connected", "work");
+    };
+    dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
+      body: offer.sdp,
+    });
+    if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
+
+    await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
+
+    listenForResults();
+  } catch (err) {
+    setState("failed");
+    log(String(err.message ?? err), "bad");
+    goBtn.disabled = false;
+  }
+}
+
+function stop() {
+  live = false;
+  pc?.close(); pc = null;
+  events?.close(); events = null;
+  fetch("/stop", { method: "POST" }).catch(() => {});
+  setState("not connected");
+  goBtn.textContent = "Start talking";
+  goBtn.className = "";
+}
+
+goBtn.onclick = () => (live ? stop() : start());
+</script>
+</body>
+</html>
