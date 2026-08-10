@@ -53,6 +53,20 @@ let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = nu
 let lastSpokeAt = 0;
 const PROGRESS_MIN_GAP_MS = 25_000;
 
+// Every time you speak, the whole conversation so far is billed again, so a long
+// drive gets steadily more expensive. The voice model is only a mouthpiece —
+// everything that matters is remembered by Claude on the Mac — so we throw away
+// its older turns and keep the cost flat. Nothing real is lost.
+const KEEP_TURNS = 10;
+const itemIds = [];
+
+function trimConversation() {
+  while (itemIds.length > KEEP_TURNS) {
+    const oldest = itemIds.shift();
+    sendEvent({ type: "conversation.item.delete", item_id: oldest });
+  }
+}
+
 function setState(text) { stateEl.textContent = text; }
 
 function log(text, cls = "") {
@@ -151,8 +165,14 @@ async function onVoiceEvent(event) {
       }
       break;
     }
+    case "conversation.item.created":
+    case "conversation.item.added":
+      if (event.item?.id) itemIds.push(event.item.id);
+      break;
+
     case "response.done":
       lastSpokeAt = Date.now();
+      trimConversation(); // only between turns, never mid-sentence
       break;
     case "error":
       log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
@@ -229,6 +249,7 @@ async function connect({ resume }) {
 
   dc = pc.createDataChannel("oai-events");
   dc.onopen = async () => {
+    itemIds.length = 0; // a new voice session — old turn identifiers are stale
     await configureSession();
     const wasReconnect = resume;
     attempt = 0;
