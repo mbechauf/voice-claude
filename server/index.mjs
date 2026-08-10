@@ -95,7 +95,9 @@ async function handle(req, res) {
 
   if (url.pathname === "/token" && req.method === "POST") {
     try {
-      forgetConversation(); // a new voice session starts a fresh conversation
+      // A fresh start wipes the slate; a reconnect after a dropped signal must not,
+      // or a tunnel would cost you everything Claude had established.
+      if (url.searchParams.get("resume") !== "1") forgetConversation();
       return send(res, 200, { secret: await mintVoiceToken(), model: VOICE_MODEL });
     } catch (err) {
       console.error(err);

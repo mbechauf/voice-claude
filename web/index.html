@@ -49,6 +49,7 @@ const logEl = document.getElementById("log");
 const goBtn = document.getElementById("go");
 
 let pc = null, dc = null, events = null, live = false;
+let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = null;
 let lastSpokeAt = 0;
 const PROGRESS_MIN_GAP_MS = 25_000;
 
@@ -109,7 +110,8 @@ const TOOLS = [
 ];
 
 async function configureSession() {
-  const instructions = await (await fetch("/instructions")).text();
+  instructionsCache ??= await (await fetch("/instructions")).text();
+  const instructions = instructionsCache;
   sendEvent({
     type: "session.update",
     session: {
@@ -193,66 +195,121 @@ function listenForResults() {
 
 // ------------------------------------------------------------------ connect
 
+// A dropped connection is the most likely way a real drive falls apart — a tunnel,
+// a cell handoff, a dead spot. Nothing here should ever require taking the phone
+// out of a pocket, so we simply keep trying until we're back.
+
+async function connect({ resume }) {
+  setState(resume ? "reconnecting…" : "connecting…");
+
+  const url = resume ? "/token?resume=1" : "/token";
+  const { secret } = await (await fetch(url, { method: "POST" })).json();
+  if (!secret) throw new Error("no voice credential");
+
+  // Ask for the microphone once and keep it. Asking again on every reconnect
+  // would prompt the user, which is exactly what we can't do at 70mph.
+  micStream ??= await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+
+  pc = new RTCPeerConnection();
+
+  const speaker = new Audio();
+  speaker.autoplay = true;
+  pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
+  pc.addTrack(micStream.getTracks()[0], micStream);
+
+  pc.onconnectionstatechange = () => {
+    if (!live) return;
+    if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+      log(`connection ${pc.connectionState}`, "bad");
+      scheduleReconnect();
+    }
+  };
+
+  dc = pc.createDataChannel("oai-events");
+  dc.onopen = async () => {
+    await configureSession();
+    const wasReconnect = resume;
+    attempt = 0;
+    live = true;
+    setState("listening — just talk");
+    goBtn.textContent = "Stop";
+    goBtn.className = "live";
+    goBtn.disabled = false;
+    log(wasReconnect ? "reconnected" : "connected", "work");
+
+    if (wasReconnect) {
+      speakThrough(
+        "[You just reconnected after the network dropped. Claude's work and your " +
+        "conversation with the user are both intact. Say briefly that you're back, then wait.]"
+      );
+    }
+  };
+  dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
+    method: "POST",
+    headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
+    body: offer.sdp,
+  });
+  if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
+
+  await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
+
+  if (!events) listenForResults();
+}
+
+function scheduleReconnect() {
+  if (!live || reconnectTimer) return;
+
+  try { pc?.close(); } catch {}
+  pc = null; dc = null;
+
+  const wait = Math.min(1000 * 2 ** attempt, 10_000);
+  attempt += 1;
+  setState(`connection lost — retrying in ${Math.round(wait / 1000)}s`);
+
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    if (!live) return;
+    try {
+      await connect({ resume: true });
+    } catch (err) {
+      log(String(err.message ?? err), "bad");
+      scheduleReconnect();
+    }
+  }, wait);
+}
+
 async function start() {
   goBtn.disabled = true;
-  setState("connecting…");
-
+  live = true;      // set before connecting so a drop mid-handshake still retries
+  attempt = 0;
   try {
-    const { secret, model } = await (await fetch("/token", { method: "POST" })).json();
-    if (!secret) throw new Error("no voice credential");
-
-    const mic = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
-
-    pc = new RTCPeerConnection();
-
-    const speaker = new Audio();
-    speaker.autoplay = true;
-    pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
-
-    pc.addTrack(mic.getTracks()[0], mic);
-
-    dc = pc.createDataChannel("oai-events");
-    dc.onopen = async () => {
-      await configureSession();
-      live = true;
-      setState("listening — just talk");
-      goBtn.textContent = "Stop";
-      goBtn.className = "live";
-      goBtn.disabled = false;
-      log("connected", "work");
-    };
-    dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
-      method: "POST",
-      headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
-      body: offer.sdp,
-    });
-    if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
-
-    await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
-
-    listenForResults();
+    await connect({ resume: false });
   } catch (err) {
-    setState("failed");
     log(String(err.message ?? err), "bad");
-    goBtn.disabled = false;
+    scheduleReconnect();
   }
 }
 
 function stop() {
   live = false;
-  pc?.close(); pc = null;
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  try { pc?.close(); } catch {}
+  pc = null; dc = null;
   events?.close(); events = null;
+  micStream?.getTracks().forEach((t) => t.stop());
+  micStream = null;
   fetch("/stop", { method: "POST" }).catch(() => {});
   setState("not connected");
   goBtn.textContent = "Start talking";
   goBtn.className = "";
+  goBtn.disabled = false;
 }
 
 goBtn.onclick = () => (live ? stop() : start());
