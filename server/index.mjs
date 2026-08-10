@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
 import { PORT, PROJECT_DIR, VOICE_MODEL, VOICE_NAME } from "./config.mjs";
-import { startWork, stopWork } from "./claude-bridge.mjs";
+import { forgetConversation, startWork, stopWork } from "./claude-bridge.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -95,6 +95,7 @@ async function handle(req, res) {
 
   if (url.pathname === "/token" && req.method === "POST") {
     try {
+      forgetConversation(); // a new voice session starts a fresh conversation
       return send(res, 200, { secret: await mintVoiceToken(), model: VOICE_MODEL });
     } catch (err) {
       console.error(err);

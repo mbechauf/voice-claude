@@ -27,8 +27,17 @@ function describeTool(name) {
 
 let current = null;
 
+// The conversation Claude is having with us, carried across questions so that
+// "explain that" and "next" mean something, and so the project context is loaded
+// once rather than paid for again on every single question.
+let conversationId = null;
+
 export function isBusy() {
   return current !== null;
+}
+
+export function forgetConversation() {
+  conversationId = null;
 }
 
 export function stopWork() {
@@ -57,8 +66,19 @@ export function startWork(request, emit) {
     ...ALLOWED_TOOLS,
   ];
 
+  // Continue the same conversation rather than starting cold every time.
+  if (conversationId) args.push("--resume", conversationId);
+
+  // Deliberately drop the Anthropic API key so Claude falls back to the signed-in
+  // subscription. Leaving it in place means every question is billed per token,
+  // including reloading the whole project context each time. Other projects on
+  // this machine keep their key — this only affects what we spawn.
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+
   const child = spawn("claude", args, {
     cwd: PROJECT_DIR,
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -103,6 +123,8 @@ export function startWork(request, emit) {
           }
         }
       }
+
+      if (event.session_id) conversationId = event.session_id;
 
       if (event.type === "result") {
         finalText = event.result ?? finalText;
