@@ -3,6 +3,7 @@
 
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,11 +185,32 @@ function localAddresses() {
 // ------------------------------------------------------------------- listen
 
 const creds = ensureCertificate();
-const server = https.createServer(creds, (req, res) => {
+const secureServer = https.createServer(creds, (req, res) => {
   handle(req, res).catch((err) => {
     console.error(err);
     send(res, 500, { error: String(err.message ?? err) });
   });
+});
+
+// Phones only grant the microphone over a secure connection, so this is HTTPS
+// only — which means typing the address without the "https://" prefix fails with
+// a bare "can't reach it". Rather than leave that trap, we watch the first byte
+// of each connection: a secure one starts with 0x16, anything else is someone
+// typing the plain address, and gets pointed at the secure one instead.
+const plainRedirect = http.createServer((req, res) => {
+  const host = (req.headers.host ?? "").split(":")[0];
+  res.writeHead(301, { location: `https://${host}:${PORT}${req.url}` });
+  res.end();
+});
+
+const server = net.createServer((socket) => {
+  socket.once("readable", () => {
+    const first = socket.read(1);
+    if (!first) return socket.destroy();
+    socket.unshift(first); // put it back so the real server sees the whole thing
+    (first[0] === 0x16 ? secureServer : plainRedirect).emit("connection", socket);
+  });
+  socket.on("error", () => socket.destroy());
 });
 
 server.listen(PORT, () => {
