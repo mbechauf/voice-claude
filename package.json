@@ -5,7 +5,10 @@
   "type": "module",
   "description": "A spoken front end to Claude Code, for reviewing and steering code while driving.",
   "scripts": {
-    "start": "node server/index.mjs"
+    "start": "node server/index.mjs",
+    "subscription:check": "node server/subscription-cli.mjs --check",
+    "claude:subscription": "node server/subscription-cli.mjs",
+    "claude:new": "node server/subscription-cli.mjs --new"
   },
   "engines": {
     "node": ">=22"

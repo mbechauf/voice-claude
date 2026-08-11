@@ -1,4 +1,5 @@
 .cert/
+.voice-claude/
 node_modules/
 .DS_Store
 *.log

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delegate to Claude"
+  short_description: "Route code questions through Claude Code"
+  default_prompt: "Use $delegate-to-claude to have Claude inspect the project and return a concise spoken answer."
