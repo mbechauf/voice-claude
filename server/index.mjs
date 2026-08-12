@@ -22,6 +22,7 @@ import {
   VOICE_NAME,
 } from "./config.mjs";
 import { forgetConversation, startWork, stopWork } from "./claude-bridge.mjs";
+import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -38,6 +39,14 @@ if (MODE === "realtime" && !OPENAI_KEY) {
 // In realtime mode the voice model rewrites Claude's answer, and applies its own.
 const briefing =
   MODE === "realtime" ? "" : fs.readFileSync(path.join(here, "spoken-answer-rules.md"), "utf8");
+
+// Asking for a voice that isn't installed would leave someone in a car listening to
+// silence, so say so here and fall back to the phone's own rather than fail later.
+const speaker = SPEAKER === "mac" && !macVoiceInstalled() ? "device" : SPEAKER;
+if (SPEAKER === "mac" && speaker !== "mac") {
+  console.log(`The good voice isn't installed yet — run "npm run voice:install".`);
+  console.log(`Falling back to the phone's own voice for now.\n`);
+}
 
 // ---------------------------------------------------------------- listeners
 
@@ -117,11 +126,30 @@ async function handle(req, res) {
     return send(res, 200, {
       mode: MODE,
       listener: LISTENER,
-      speaker: SPEAKER,
+      speaker,
       speakerVoice: SPEAKER_VOICE,
       speakerRate: SPEAKER_RATE,
       project: path.basename(PROJECT_DIR),
     });
+  }
+
+  // One sentence in, the sound of it out. The phone asks for these one at a time as
+  // it reads an answer, so that "stop" lands within a breath.
+  if (url.pathname === "/say" && req.method === "POST") {
+    const { text } = await readBody(req);
+    if (!text) return send(res, 400, { error: "nothing to say" });
+    try {
+      const audio = await speak(text);
+      res.writeHead(200, {
+        "content-type": "audio/wav",
+        "content-length": audio.length,
+        "cache-control": "no-store",
+      });
+      return res.end(audio);
+    } catch (err) {
+      console.error(`voice: ${err.message}`);
+      return send(res, 503, { error: String(err.message ?? err) });
+    }
   }
 
   if (url.pathname === "/token" && req.method === "POST") {
@@ -266,8 +294,12 @@ server.listen(PORT, () => {
     console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
     console.log(`Cost:        billed per minute of audio, both directions.`);
   } else {
-    console.log(`Voice:       the phone's own dictation and voices (${LISTENER}/${SPEAKER})`);
+    const mouth = speaker === "mac" ? `this Mac, ${SPEAKER_VOICE}` : "the phone's own voice";
+    console.log(`Hearing:     the phone's own dictation`);
+    console.log(`Speaking:    ${mouth}`);
     console.log(`Cost:        nothing beyond the Claude subscription.`);
+    // Loading the voice takes a few seconds. Do it now, not when someone is waiting.
+    if (speaker === "mac") warmUp();
   }
   console.log(`\nOpen this on the phone:`);
   for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);

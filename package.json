@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server/index.mjs",
     "check": "node server/self-check.mjs",
+    "voice:install": "bash scripts/install-voice.sh",
     "start:paid": "VOICE_CLAUDE_MODE=realtime node server/index.mjs",
     "subscription:check": "node server/subscription-cli.mjs --check",
     "claude:subscription": "node server/subscription-cli.mjs",

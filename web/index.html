@@ -172,6 +172,30 @@ function deviceEars({ onHeard, onHearing, onTrouble }) {
 // the end of a paragraph, and so nothing hits the phone's limit on how much it will
 // say in one go.
 
+// Both voices read the same way: sentence by sentence, so that "stop" takes effect
+// within a breath rather than at the end of a paragraph, and so nothing hits the
+// limit on how much a phone will say in one go.
+function intoSentences(text) {
+  const clean = text
+    .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
+    .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
+    .replace(/\s+/g, " ")
+    .trim();
+  const parts = [];
+  for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
+    // A very long sentence still has to be broken somewhere, or it gets cut off.
+    if (sentence.length <= 220) { if (sentence) parts.push(sentence); continue; }
+    let rest = sentence;
+    while (rest.length > 220) {
+      const cut = rest.lastIndexOf(" ", 220);
+      parts.push(rest.slice(0, cut > 60 ? cut : 220));
+      rest = rest.slice(cut > 60 ? cut : 220).trim();
+    }
+    if (rest) parts.push(rest);
+  }
+  return parts;
+}
+
 function deviceMouth({ voiceName, rate, onStart, onFinish }) {
   const synth = window.speechSynthesis;
   if (!synth) return null;
@@ -200,27 +224,6 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
   // The list of voices arrives late on some phones, so ask again when it changes.
   synth.addEventListener?.("voiceschanged", () => { chosen = pickVoice(); });
   chosen = pickVoice();
-
-  function intoSentences(text) {
-    const clean = text
-      .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
-      .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
-      .replace(/\s+/g, " ")
-      .trim();
-    const parts = [];
-    for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
-      // A very long sentence still has to be broken somewhere, or it gets cut off.
-      if (sentence.length <= 220) { if (sentence) parts.push(sentence); continue; }
-      let rest = sentence;
-      while (rest.length > 220) {
-        const cut = rest.lastIndexOf(" ", 220);
-        parts.push(rest.slice(0, cut > 60 ? cut : 220));
-        rest = rest.slice(cut > 60 ? cut : 220).trim();
-      }
-      if (rest) parts.push(rest);
-    }
-    return parts;
-  }
 
   function next() {
     if (!queue.length) {
@@ -263,6 +266,102 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
   };
 }
 
+// --------------------------------------------------------------- the Mac's voice
+//
+// A proper voice, generated on the Mac and sent down here a sentence at a time. The
+// phone does no talking at all; it just plays what arrives. The next sentence is
+// fetched while the current one plays, so the pause is only ever before the first.
+
+const SILENCE =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=";
+
+function macMouth({ fallback, onStart, onFinish, onTrouble }) {
+  const player = new Audio();
+  player.preload = "auto";
+
+  let speaking = false;
+  let abandoned = false;
+
+  async function fetchSound(sentence) {
+    const response = await fetch("/say", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: sentence }),
+    });
+    if (!response.ok) throw new Error(`the Mac couldn't say that (${response.status})`);
+    return URL.createObjectURL(await response.blob());
+  }
+
+  function play(url) {
+    return new Promise((resolve) => {
+      const done = () => { URL.revokeObjectURL(url); resolve(); };
+      player.onended = done;
+      player.onerror = done; // a dud sentence must not strand the rest of the answer
+      player.src = url;
+      player.play().catch(done);
+    });
+  }
+
+  async function read(parts) {
+    let pending;
+    try {
+      pending = fetchSound(parts[0]);
+      await pending;
+    } catch (err) {
+      // The good voice is unreachable. Better a rough voice than silence in a car.
+      onTrouble?.(String(err.message ?? err));
+      speaking = false;
+      fallback?.speak(parts.join(" "));
+      return;
+    }
+
+    for (let i = 0; i < parts.length; i += 1) {
+      let sound;
+      try {
+        sound = await pending;
+      } catch (err) {
+        onTrouble?.(String(err.message ?? err));
+        break;
+      }
+      if (abandoned) { URL.revokeObjectURL(sound); break; }
+
+      // Start making the next one while this one is being heard.
+      pending = i + 1 < parts.length ? fetchSound(parts[i + 1]).catch(() => null) : null;
+      await play(sound);
+      if (abandoned) break;
+    }
+
+    speaking = false;
+    onFinish?.();
+  }
+
+  return {
+    // iPhones stay silent unless the first sound was asked for by a tap, so a moment
+    // of nothing is played from the Start button and the rest of the drive is free.
+    unlock() {
+      player.src = SILENCE;
+      player.play().catch(() => {});
+      fallback?.unlock();
+    },
+    speak(text) {
+      const parts = intoSentences(text);
+      if (!parts.length) return;
+      abandoned = false;
+      speaking = true;
+      onStart?.();
+      read(parts);
+    },
+    silence() {
+      abandoned = true;
+      try { player.pause(); } catch {}
+      player.removeAttribute("src");
+      fallback?.silence();
+      if (speaking) { speaking = false; onFinish?.(); }
+    },
+    get busy() { return speaking || Boolean(fallback?.busy); },
+  };
+}
+
 // ------------------------------------------------------------ the words that mean
 //
 // With no model in the middle, these have to be understood here. They are matched
@@ -281,16 +380,27 @@ function commandIn(text) {
 // ------------------------------------------------------------- the free front end
 
 function splitFrontEnd() {
-  const mouth = deviceMouth({
-    voiceName: setup.speakerVoice,
-    rate: setup.speakerRate,
+  const talking = {
     onStart: () => { goBtn.className = "talking"; goBtn.textContent = "Stop talking"; },
     onFinish: () => {
       goBtn.className = "live";
       goBtn.textContent = "Stop";
       setState(working ? "still working — just talk" : "listening — just talk");
     },
+  };
+
+  // The phone's own voice is either the choice or the safety net, depending on what
+  // the Mac says it is doing.
+  const phoneVoice = deviceMouth({
+    voiceName: setup.speaker === "mac" ? "" : setup.speakerVoice,
+    rate: setup.speakerRate,
+    ...talking,
   });
+
+  const mouth =
+    setup.speaker === "mac"
+      ? macMouth({ fallback: phoneVoice, ...talking, onTrouble: (m) => log(m, "bad") })
+      : phoneVoice;
 
   let working = false;
   let ears = null;
@@ -372,7 +482,12 @@ function splitFrontEnd() {
       goBtn.textContent = "Stop";
       goBtn.className = "live";
       goBtn.disabled = false;
-      log("ready — nothing here is billed", "work");
+      log(
+        setup.speaker === "mac"
+          ? "ready — the Mac is doing the talking, and nothing here is billed"
+          : "ready — nothing here is billed",
+        "work",
+      );
     },
     stop() {
       ears?.stop(); ears = null;

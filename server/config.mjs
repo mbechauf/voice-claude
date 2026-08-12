@@ -21,16 +21,23 @@ export const PROJECT_DIR =
 //   "realtime" — OpenAI's speech-to-speech model. Billed per minute, both ways.
 export const MODE = process.env.VOICE_CLAUDE_MODE ?? "split";
 
-// Who does each half in split mode. "device" is the phone's own dictation and its
-// own built-in voices: nothing billed, and only the text of your question ever
-// leaves it. A paid speech service would slot in here as another name, and would
-// change nothing else in the system.
+// Who does each half in split mode. A paid speech service would slot in here as
+// another name, and would change nothing else in the system.
+//
+//   listener "device" — the phone's own dictation. Only the words leave the phone.
+//   speaker  "mac"    — a proper voice generated here and sent down to the phone.
+//   speaker  "device" — the phone's own built-in voice. Free, and rough to listen to
+//                       for any length of time; kept as the fallback for when the
+//                       Mac voice isn't installed.
 export const LISTENER = process.env.VOICE_CLAUDE_LISTENER ?? "device";
-export const SPEAKER = process.env.VOICE_CLAUDE_SPEAKER ?? "device";
+export const SPEAKER = process.env.VOICE_CLAUDE_SPEAKER ?? "mac";
 
-// Which of the phone's voices to use, matched loosely against the names it offers.
-// Empty means "let the phone pick its default".
-export const SPEAKER_VOICE = process.env.VOICE_CLAUDE_SPEAKER_VOICE ?? "";
+// Which voice. For the Mac voice these are its own names — the American women are
+// af_heart and af_bella, the American men am_michael and am_adam, and the British
+// pair are bf_emma and bm_george. For the phone's voice it is matched loosely
+// against whatever that phone happens to offer, and empty means "let it choose".
+export const SPEAKER_VOICE =
+  process.env.VOICE_CLAUDE_SPEAKER_VOICE ?? (SPEAKER === "mac" ? "af_heart" : "");
 
 // How fast it reads answers out. Slightly quick suits driving; raise it once the
 // phrasing is familiar.

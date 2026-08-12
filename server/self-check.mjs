@@ -76,6 +76,33 @@ try {
   });
   check("turns away an empty request", empty.status === 400, `got ${empty.status}`);
 
+  // The voice half. When the good voice isn't installed the server is supposed to
+  // say so and fall back rather than leave someone in a car listening to nothing.
+  if (setup.speaker === "mac") {
+    const started = Date.now();
+    const sound = await fetch(`${base}/say`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "One real finding, though." }),
+    });
+    const audio = sound.ok ? await sound.arrayBuffer() : new ArrayBuffer(0);
+    check("the Mac speaks a sentence", sound.ok && audio.byteLength > 10_000, `${audio.byteLength} bytes`);
+    check(
+      "and does it fast enough not to be noticed",
+      Date.now() - started < 15_000,
+      `${((Date.now() - started) / 1000).toFixed(1)}s including waking the voice`,
+    );
+
+    const nothing = await fetch(`${base}/say`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    check("turns away an empty sentence", nothing.status === 400, `got ${nothing.status}`);
+  } else {
+    check("falls back to the phone's voice when the good one is missing", true, "the Mac voice is not installed");
+  }
+
   check("the banner says plainly that nothing is billed", banner.includes("nothing beyond the Claude subscription"));
 } finally {
   server.kill("SIGTERM");

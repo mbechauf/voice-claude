@@ -7,30 +7,40 @@ The thinking is always Claude Code, running on this Mac against your real files,
 Claude subscription. What changes between modes is only who does the hearing and the speaking, and
 what that costs.
 
-| Mode | Hearing and speaking | Cost |
-| --- | --- | --- |
-| **Free voice** (default) | the phone's own dictation and voices | nothing |
-| **Paid voice** | OpenAI's realtime speech-to-speech model | billed per minute, both directions |
-| **ChatGPT Voice** | ChatGPT itself, delegating to Claude | ChatGPT plan allowance; unproven, see below |
+| Mode | Hearing | Speaking | Cost |
+| --- | --- | --- | --- |
+| **Free voice** (default) | the phone's dictation | a proper voice on this Mac | nothing |
+| **Paid voice** | OpenAI's realtime speech-to-speech model | | billed per minute, both directions |
+| **ChatGPT Voice** | ChatGPT itself, delegating to Claude | | plan allowance; unproven, see below |
 
 ## Free voice mode—the default
 
 Hearing and speaking are two separate jobs. Only the realtime model forces them together, inside a
 single billed audio stream, and that convenience was the entire cost of this project. So the default
-keeps them apart and buys each half from the phone, for nothing:
+keeps them apart and buys each half where it is free:
 
 ```text
-your voice → the phone's own dictation → this Mac → Claude Code → the phone's own voice
+your voice → the phone's own dictation → this Mac → Claude Code → a voice on this Mac → your ears
 ```
 
 Nothing is sent to OpenAI, and no credential is needed. Only the text of your question leaves the
 phone, and it goes to your own Mac.
 
+The phone can do the speaking too, and did at first, but its built-in voice is genuinely unpleasant
+to listen to for an hour. So the answer is spoken by a neural voice running here instead and sent
+down a sentence at a time. It generates about ten seconds of speech per second of work, so only the
+first sentence of an answer has any wait in front of it—about half a second.
+
 ### Running it
 
 ```bash
+npm run voice:install   # once: sets up the voice. Free to install, free to use.
 npm start
 ```
+
+`npm run voice:install` needs Homebrew, and installs an older Python and some pronunciation data
+alongside the voice itself. If the voice is missing when the server starts, it says so and falls
+back to the phone's own rather than leaving you with silence in a car.
 
 Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
 so Safari warns the first time; accept it and it stays accepted.
@@ -57,12 +67,20 @@ Also, a web page on an iPhone is suspended when the screen locks, so this does n
 ### Changing the voice
 
 ```bash
-VOICE_CLAUDE_SPEAKER_VOICE=samantha VOICE_CLAUDE_SPEAKER_RATE=1.2 npm start
+VOICE_CLAUDE_SPEAKER_VOICE=bf_emma VOICE_CLAUDE_SPEAKER_RATE=1.2 npm start
 ```
 
-The names are matched loosely against whatever voices the phone offers. Leave the voice empty to let
-the phone choose. A paid speech service would slot into either half as another name in
-`server/config.mjs` and would change nothing else.
+Six to choose from: the American women are `af_heart` (the default) and `af_bella`, the American men
+are `am_michael` and `am_adam`, and the British pair are `bf_emma` and `bm_george`.
+
+To hand the speaking back to the phone—rougher, but it works with the Mac's voice uninstalled:
+
+```bash
+VOICE_CLAUDE_SPEAKER=device npm start
+```
+
+A paid speech service would slot into either half as another name in `server/config.mjs`, and would
+change nothing else in the system.
 
 ### Which project it talks about
 
