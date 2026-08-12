@@ -43,15 +43,23 @@ export const SPEAKER_VOICE =
 // phrasing is familiar.
 export const SPEAKER_RATE = Number(process.env.VOICE_CLAUDE_SPEAKER_RATE ?? 1.05);
 
-// Nothing reaches Claude unless it is said between these two phrases. A car is full
-// of talk that was never meant for it — the radio, a passenger, thinking out loud —
-// and guessing which is which is what makes a listening machine exhausting. So it
-// does not guess: you open, you speak for as long as you like, you close.
+// How it decides that something was meant for it.
+//
+//   "always" — everything you say is the question, sent once you stop talking. No
+//              ceremony at all. What you want in a car alone.
+//   "phrases" — nothing counts unless it is said between the two phrases below.
+//              Worth it only if something else in the car keeps setting it off.
+export const GATE = process.env.VOICE_CLAUDE_GATE ?? "always";
+
+// How long a silence means you have finished. Long enough to think mid-sentence,
+// short enough that you are not left wondering whether it heard you.
+export const PAUSE_MS = Number(process.env.VOICE_CLAUDE_PAUSE ?? 3_500);
+
 export const OPEN_PHRASE = process.env.VOICE_CLAUDE_OPEN ?? "claude go";
 export const CLOSE_PHRASE = process.env.VOICE_CLAUDE_CLOSE ?? "claude stop";
 
-// If you open it and then forget, this is how long it waits before sending what it
-// has rather than staying open all the way home. Silence, not a pause for thought.
+// In the phrase gate, how long it waits before giving up on a question you started
+// and then forgot about. Silence, not a pause for thought.
 export const OPEN_TIMEOUT_MS = Number(process.env.VOICE_CLAUDE_OPEN_TIMEOUT ?? 30_000);
 
 // Realtime mode only. The small model is ~1/3 the price and is only ever a

@@ -14,6 +14,7 @@
   }
   header { padding: 1.25rem 0 0.5rem; }
   h1 { font-size: 1.1rem; margin: 0; font-weight: 600; letter-spacing: 0.01em; }
+  #version { color: #6b675e; font-weight: 400; font-size: 0.8rem; }
   #state { color: #9b968a; font-size: 0.9rem; margin-top: 0.25rem; }
   button {
     font: inherit; font-size: 1.35rem; font-weight: 600;
@@ -49,7 +50,7 @@
 </head>
 <body>
 <header>
-  <h1>voice-claude</h1>
+  <h1>voice-claude <span id="version">__VERSION__</span></h1>
   <div id="state">not connected</div>
 </header>
 
@@ -67,6 +68,7 @@ const goBtn = document.getElementById("go");
 const endBtn = document.getElementById("end");
 
 const setup = await (await fetch("/setup")).json();
+
 
 function setState(text) { stateEl.textContent = text; }
 
@@ -103,6 +105,8 @@ function trace(what, detail = "") {
     body: JSON.stringify({ what, detail: String(detail).slice(0, 200) }),
   }).catch(() => {});
 }
+
+trace("page loaded", document.getElementById("version").textContent);
 
 const stopWork = () => fetch("/stop", { method: "POST" }).catch(() => {});
 const forgetDrive = () => fetch("/new", { method: "POST" }).catch(() => {});
@@ -600,8 +604,10 @@ function splitFrontEnd() {
   let working = false;
   let ears = null;
 
-  // Open, and everything you say is collected until you close — through pauses, over
-  // as many sentences as you like. Closed, it hears you and does nothing.
+  // By default there is no gate at all: it is always taking down what you say, and a
+  // few seconds of silence is what sends it. Asking someone to announce themselves
+  // before every question is ceremony, and ceremony in a car is friction.
+  const always = setup.gate !== "phrases";
   let open = false;
   let collected = [];
   let forgetTimer = null;
@@ -612,24 +618,30 @@ function splitFrontEnd() {
   // more than any of it.
   function paint() {
     if (mouth?.busy) { goBtn.textContent = "Quiet"; goBtn.className = "talking"; }
-    else if (open) { goBtn.textContent = "Send it"; goBtn.className = "open"; }
+    else if (collected.length) { goBtn.textContent = "Send it now"; goBtn.className = "open"; }
+    else if (open) { goBtn.textContent = "Listening"; goBtn.className = "open"; }
     else { goBtn.textContent = "Ask something"; goBtn.className = "live"; }
     heardEl.className = open ? "keeping" : "";
   }
 
   function idleState() {
-    setState(
-      working
-        ? `working — say "${setup.openPhrase}" or tap to butt in`
-        : `not recording — say "${setup.openPhrase}" or tap the button`,
-    );
+    if (always) {
+      setState(working ? "working — talk over it whenever you like" : "listening — just talk");
+    } else {
+      setState(
+        working
+          ? `working — say "${setup.openPhrase}" or tap to butt in`
+          : `not recording — say "${setup.openPhrase}" or tap the button`,
+      );
+    }
+    paint();
   }
 
-  // The gate only gives up if you have gone quiet altogether. Any word at all, even
-  // one it has not finished hearing, means you are still in the middle of asking.
+  // Any word at all, even one it has not finished hearing, means you are still in the
+  // middle of asking. Silence is the only thing that means you are done.
   function stillThere() {
     clearTimeout(forgetTimer);
-    forgetTimer = setTimeout(closeGate, setup.openTimeout ?? 30_000);
+    forgetTimer = setTimeout(closeGate, always ? (setup.pause ?? 3_500) : (setup.openTimeout ?? 30_000));
   }
 
   function openGate() {
@@ -657,7 +669,8 @@ function splitFrontEnd() {
       return;
     }
 
-    open = false;
+    // With no gate it never stops listening; sending is just the end of a question.
+    open = always;
     beep("close");
     const question = collected.join(" ").trim();
     collected = [];
@@ -681,19 +694,25 @@ function splitFrontEnd() {
   }
 
   function heard(text) {
+    // Its own voice off the windscreen is not a question. This is the only thing
+    // standing between "always listening" and it talking to itself in circles.
+    if (mouth?.busy) {
+      if (soundsLikeItself(text, mouth.saying)) { trace("ignored (its own voice)", text); return; }
+      mouth.silence();   // you talked over it, so it stops and takes this down
+    }
+
     heardEl.textContent = "";
 
     for (const step of readAsInstructions(text, setup.openPhrase, setup.closePhrase)) {
       if (step.open) { openGate(); continue; }
       if (step.close) { closeGate(); continue; }
-
-      // Words with the gate shut were not meant for it. This is the whole point:
-      // the radio, a passenger and thinking out loud all land here and go nowhere.
       if (!open) { trace("ignored (gate shut)", step.say); continue; }
 
       collected.push(step.say);
       heardEl.textContent = collected.join(" ");
+      trace("keeping", step.say);
       stillThere();
+      paint();
     }
   }
 
@@ -746,12 +765,15 @@ function splitFrontEnd() {
       listenForResults(fromClaude);
       ears.start();
       goBtn.disabled = false;
-      paint();
+      open = always;   // no gate means it is listening from the moment you start
       idleState();
       log(
-        `ready — say "${setup.openPhrase}" or tap the button, ask, then say "${setup.closePhrase}"`,
+        always
+          ? `ready — just talk. It sends when you stop for a few seconds.`
+          : `ready — say "${setup.openPhrase}" or tap the button, ask, then say "${setup.closePhrase}"`,
         "work",
       );
+      trace("session started", always ? "no gate" : "phrase gate");
     },
     stop() {
       ears?.stop(); ears = null;
@@ -768,7 +790,8 @@ function splitFrontEnd() {
     // or the road is too loud to be heard over.
     tap() {
       if (mouth?.busy) { mouth.silence(); trace("tapped: quiet"); return; }
-      if (open) { trace("tapped: send"); closeGate(); return; }
+      if (collected.length) { trace("tapped: send now"); closeGate(); return; }
+      if (open) { trace("tapped: nothing to send yet"); return; }
       trace("tapped: open");
       openGate();
     },

@@ -12,10 +12,12 @@ import { networkInterfaces } from "node:os";
 
 import {
   CLOSE_PHRASE,
+  GATE,
   LISTENER,
   MODE,
   OPEN_PHRASE,
   OPEN_TIMEOUT_MS,
+  PAUSE_MS,
   PORT,
   PROJECT_DIR,
   SPEAKER,
@@ -115,8 +117,19 @@ async function handle(req, res) {
   const url = new URL(req.url, "http://localhost");
 
   if (url.pathname === "/" || url.pathname === "/index.html") {
-    const html = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
-    return send(res, 200, html, "text/html; charset=utf-8");
+    const file = path.join(root, "web", "index.html");
+    const html = fs.readFileSync(file, "utf8");
+    // A phone holding on to yesterday's page and a genuine bug look identical from
+    // the driver's seat, and one of them wastes an afternoon. So it is never cached,
+    // and the page carries the moment it was written so both ends can see which it is.
+    const stamp = fs.statSync(file).mtime.toISOString().slice(5, 16).replace("T", " ");
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store, must-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    });
+    return res.end(html.replace("__VERSION__", stamp));
   }
 
   if (url.pathname === "/instructions") {
@@ -133,6 +146,8 @@ async function handle(req, res) {
       speaker,
       speakerVoice: SPEAKER_VOICE,
       speakerRate: SPEAKER_RATE,
+      gate: GATE,
+      pause: PAUSE_MS,
       openPhrase: OPEN_PHRASE,
       closePhrase: CLOSE_PHRASE,
       openTimeout: OPEN_TIMEOUT_MS,
