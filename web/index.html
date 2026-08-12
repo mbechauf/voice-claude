@@ -23,6 +23,10 @@
   }
   button.live { background: #3a3a32; }
   button:disabled { opacity: 0.5; }
+  /* While it is talking the whole button becomes a way to shut it up, because that
+     is the one thing you want within reach without aiming. */
+  button.talking { background: #5a4030; }
+  #heard { min-height: 1.5rem; color: #8fc7a8; font-size: 1.05rem; padding: 0.25rem 0; }
   #log {
     flex: 1; overflow-y: auto; font-size: 0.9rem;
     border-top: 1px solid #2e2e26; padding-top: 0.75rem; margin-top: 0.25rem;
@@ -41,31 +45,16 @@
 
 <button id="go">Start talking</button>
 
+<div id="heard"></div>
 <div id="log"></div>
 
 <script type="module">
 const stateEl = document.getElementById("state");
+const heardEl = document.getElementById("heard");
 const logEl = document.getElementById("log");
 const goBtn = document.getElementById("go");
 
-let pc = null, dc = null, events = null, live = false;
-let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = null;
-let lastSpokeAt = 0;
-const PROGRESS_MIN_GAP_MS = 25_000;
-
-// Every time you speak, the whole conversation so far is billed again, so a long
-// drive gets steadily more expensive. The voice model is only a mouthpiece —
-// everything that matters is remembered by Claude on the Mac — so we throw away
-// its older turns and keep the cost flat. Nothing real is lost.
-const KEEP_TURNS = 10;
-const itemIds = [];
-
-function trimConversation() {
-  while (itemIds.length > KEEP_TURNS) {
-    const oldest = itemIds.shift();
-    sendEvent({ type: "conversation.item.delete", item_id: oldest });
-  }
-}
+const setup = await (await fetch("/setup")).json();
 
 function setState(text) { stateEl.textContent = text; }
 
@@ -77,116 +66,445 @@ function log(text, cls = "") {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ---------------------------------------------------------- talking to the voice
+// ---------------------------------------------------------------------- the Mac
+//
+// Everything below this line is the same whichever voice layer is in use: work goes
+// to the Mac, and answers come back from it on their own.
 
-function sendEvent(obj) {
-  if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
-}
+let results = null;
+let lastAnswer = "";
 
-// Put something in front of the voice model and have it speak.
-function speakThrough(note) {
-  sendEvent({
-    type: "conversation.item.create",
-    item: { type: "message", role: "user", content: [{ type: "input_text", text: note }] },
-  });
-  sendEvent({ type: "response.create" });
-  lastSpokeAt = Date.now();
-}
-
-const TOOLS = [
-  {
-    type: "function",
-    name: "ask_claude",
-    description:
-      "Hand a request to Claude, which reads and reasons about the user's real code on their machine. " +
-      "Use this for ANY question or instruction about their code, project, tests, commits, or tools — " +
-      "you have no knowledge of these yourself. Returns immediately; the answer arrives later and you " +
-      "will be told to speak it.",
-    parameters: {
-      type: "object",
-      properties: {
-        request: {
-          type: "string",
-          description:
-            "What the user wants, in full, as an instruction to a capable engineer. Include anything " +
-            "from earlier in the conversation that is needed to make sense of it on its own.",
-        },
-      },
-      required: ["request"],
-    },
-  },
-  {
-    type: "function",
-    name: "stop_claude",
-    description: "Stop whatever Claude is currently doing. Use when the user says stop.",
-    parameters: { type: "object", properties: {} },
-  },
-];
-
-async function configureSession() {
-  instructionsCache ??= await (await fetch("/instructions")).text();
-  const instructions = instructionsCache;
-  sendEvent({
-    type: "session.update",
-    session: {
-      type: "realtime",
-      instructions,
-      tools: TOOLS,
-      tool_choice: "auto",
-    },
+function ask(request) {
+  return fetch("/ask", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request }),
   });
 }
 
-function answerTool(callId, output) {
-  sendEvent({
-    type: "conversation.item.create",
-    item: { type: "function_call_output", call_id: callId, output },
-  });
-  sendEvent({ type: "response.create" });
-  lastSpokeAt = Date.now();
-}
+const stopWork = () => fetch("/stop", { method: "POST" }).catch(() => {});
+const forgetDrive = () => fetch("/new", { method: "POST" }).catch(() => {});
 
-async function onVoiceEvent(event) {
-  switch (event.type) {
-    case "response.function_call_arguments.done": {
-      const args = JSON.parse(event.arguments || "{}");
-      if (event.name === "ask_claude") {
-        log(`you: ${args.request}`, "you");
-        await fetch("/ask", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ request: args.request }),
-        });
-        answerTool(event.call_id, "Started. Say one short sentence to acknowledge, then wait quietly.");
-      } else if (event.name === "stop_claude") {
-        await fetch("/stop", { method: "POST" });
-        log("stopped", "work");
-        answerTool(event.call_id, "Stopped.");
-      }
-      break;
-    }
-    case "conversation.item.created":
-    case "conversation.item.added":
-      if (event.item?.id) itemIds.push(event.item.id);
-      break;
-
-    case "response.done":
-      lastSpokeAt = Date.now();
-      trimConversation(); // only between turns, never mid-sentence
-      break;
-    case "error":
-      log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
-      break;
-  }
-}
-
-// ------------------------------------------------------- results coming back
-
-function listenForResults() {
-  events = new EventSource("/events");
-  events.onmessage = (message) => {
+// `handle` is given ("progress" | "final" | "error", text) as Claude works.
+function listenForResults(handle) {
+  results = new EventSource("/events");
+  results.onmessage = (message) => {
     const { kind, text } = JSON.parse(message.data);
+    if (kind === "final") lastAnswer = text;
+    handle(kind, text);
+  };
+  results.onerror = () => setState("lost the link to the Mac — retrying");
+}
 
+// -------------------------------------------------------------- the phone's ears
+//
+// The phone's own dictation. Free, and the audio never leaves it — only the words
+// come back. It stops listening on its own after a pause, so we start it again;
+// nothing here may ever need a tap at seventy miles an hour.
+
+function deviceEars({ onHeard, onHearing, onTrouble }) {
+  const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+  if (!Recognition) return null;
+
+  let recognition = null;
+  let wanted = false;
+  let restartTimer = null;
+
+  function build() {
+    const r = new Recognition();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = navigator.language || "en-US";
+
+    r.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = (result[0]?.transcript ?? "").trim();
+        if (!text) continue;
+        if (result.isFinal) onHeard(text);
+        else onHearing(text);
+      }
+    };
+
+    // Silence and short drop-outs both arrive here. Neither is a problem; we simply
+    // start again. A refused microphone is the one case worth telling someone about.
+    r.onend = () => { if (wanted) restart(400); };
+    r.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        wanted = false;
+        onTrouble("The phone won't give this page the microphone. Allow it in Safari's settings for this site.");
+        return;
+      }
+      if (event.error === "aborted" || event.error === "no-speech") return;
+      onTrouble(`dictation hiccup: ${event.error}`);
+    };
+    return r;
+  }
+
+  function restart(delay = 0) {
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => {
+      if (!wanted) return;
+      try {
+        recognition = build();
+        recognition.start();
+      } catch {
+        restart(800); // it was still shutting down; try again shortly
+      }
+    }, delay);
+  }
+
+  return {
+    start() { wanted = true; restart(0); },
+    stop() {
+      wanted = false;
+      clearTimeout(restartTimer);
+      try { recognition?.stop(); } catch {}
+      recognition = null;
+    },
+  };
+}
+
+// ------------------------------------------------------------ the phone's mouth
+//
+// The phone's own voices. Also free. Long answers are broken into sentences and
+// spoken one at a time, so that "stop" takes effect within a breath rather than at
+// the end of a paragraph, and so nothing hits the phone's limit on how much it will
+// say in one go.
+
+function deviceMouth({ voiceName, rate, onStart, onFinish }) {
+  const synth = window.speechSynthesis;
+  if (!synth) return null;
+
+  let queue = [];
+  let speaking = false;
+  let chosen = null;
+
+  function pickVoice() {
+    const voices = synth.getVoices();
+    if (!voices.length) return null;
+    const wanted = (voiceName ?? "").toLowerCase();
+    if (wanted) {
+      const match = voices.find((v) => v.name.toLowerCase().includes(wanted));
+      if (match) return match;
+    }
+    const language = (navigator.language || "en-US").slice(0, 2);
+    // Prefer a voice that lives on the phone: no network, no delay, no cost.
+    return (
+      voices.find((v) => v.lang.startsWith(language) && v.localService) ??
+      voices.find((v) => v.lang.startsWith(language)) ??
+      voices[0]
+    );
+  }
+
+  // The list of voices arrives late on some phones, so ask again when it changes.
+  synth.addEventListener?.("voiceschanged", () => { chosen = pickVoice(); });
+  chosen = pickVoice();
+
+  function intoSentences(text) {
+    const clean = text
+      .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
+      .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
+      .replace(/\s+/g, " ")
+      .trim();
+    const parts = [];
+    for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
+      // A very long sentence still has to be broken somewhere, or it gets cut off.
+      if (sentence.length <= 220) { if (sentence) parts.push(sentence); continue; }
+      let rest = sentence;
+      while (rest.length > 220) {
+        const cut = rest.lastIndexOf(" ", 220);
+        parts.push(rest.slice(0, cut > 60 ? cut : 220));
+        rest = rest.slice(cut > 60 ? cut : 220).trim();
+      }
+      if (rest) parts.push(rest);
+    }
+    return parts;
+  }
+
+  function next() {
+    if (!queue.length) {
+      speaking = false;
+      onFinish?.();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(queue.shift());
+    if (chosen) utterance.voice = chosen;
+    utterance.rate = rate ?? 1;
+    utterance.onend = next;
+    utterance.onerror = next; // a failed sentence must not strand the rest
+    synth.speak(utterance);
+  }
+
+  return {
+    // iPhones stay silent unless the first sound was asked for by a tap, so this is
+    // called once from the Start button and the rest of the drive is hands-free.
+    unlock() {
+      const silent = new SpeechSynthesisUtterance(" ");
+      silent.volume = 0;
+      synth.speak(silent);
+    },
+    speak(text) {
+      const parts = intoSentences(text);
+      if (!parts.length) return;
+      queue = parts;
+      if (!speaking) {
+        speaking = true;
+        onStart?.();
+        next();
+      }
+    },
+    silence() {
+      queue = [];
+      synth.cancel();
+      if (speaking) { speaking = false; onFinish?.(); }
+    },
+    get busy() { return speaking; },
+  };
+}
+
+// ------------------------------------------------------------ the words that mean
+//
+// With no model in the middle, these have to be understood here. They are matched
+// only when said alone, so a sentence that happens to contain "stop" is still just
+// a sentence.
+
+function commandIn(text) {
+  const word = text.toLowerCase().replace(/[^a-z ]/g, "").trim();
+  if (["stop", "shut up", "quiet", "cancel"].includes(word)) return "stop";
+  if (["wait", "hold on", "hang on", "pause"].includes(word)) return "wait";
+  if (["repeat", "say that again", "again"].includes(word)) return "repeat";
+  if (["start over", "new conversation", "forget that", "reset"].includes(word)) return "restart";
+  return null;
+}
+
+// ------------------------------------------------------------- the free front end
+
+function splitFrontEnd() {
+  const mouth = deviceMouth({
+    voiceName: setup.speakerVoice,
+    rate: setup.speakerRate,
+    onStart: () => { goBtn.className = "talking"; goBtn.textContent = "Stop talking"; },
+    onFinish: () => {
+      goBtn.className = "live";
+      goBtn.textContent = "Stop";
+      setState(working ? "still working — just talk" : "listening — just talk");
+    },
+  });
+
+  let working = false;
+  let ears = null;
+
+  function heard(text) {
+    heardEl.textContent = "";
+    const command = commandIn(text);
+
+    // While it is speaking, only the command words count. Anything else it "hears"
+    // at that moment is almost always its own voice coming back in.
+    if (mouth?.busy && !command) return;
+
+    if (command === "stop") {
+      mouth?.silence();
+      stopWork();
+      working = false;
+      log("stopped", "work");
+      setState("listening — just talk");
+      return;
+    }
+    if (command === "wait") { mouth?.silence(); return; }
+    if (command === "repeat") {
+      if (lastAnswer) mouth?.speak(lastAnswer);
+      return;
+    }
+    if (command === "restart") {
+      mouth?.silence();
+      forgetDrive();
+      log("starting fresh", "work");
+      mouth?.speak("Starting fresh.");
+      return;
+    }
+
+    // Dictation hands over stray fragments when the road is noisy. A couple of words
+    // is never a real question, and sending it would waste a minute of Claude's time.
+    if (text.split(/\s+/).length < 3) return;
+
+    mouth?.silence();
+    log(`you: ${text}`, "you");
+    working = true;
+    setState("thinking…");
+    ask(text).catch((err) => log(String(err.message ?? err), "bad"));
+  }
+
+  function fromClaude(kind, text) {
+    if (kind === "progress") {
+      log(text, "work");
+      setState(text);
+      return;
+    }
+    if (kind === "final") {
+      working = false;
+      log(text.slice(0, 400));
+      mouth?.speak(text);
+      return;
+    }
+    if (kind === "error") {
+      working = false;
+      log(text, "bad");
+      mouth?.speak(text);
+    }
+  }
+
+  return {
+    async start() {
+      if (!mouth) throw new Error("This browser has no built-in voice. Use Safari.");
+      mouth.unlock();
+
+      ears = deviceEars({
+        onHeard: heard,
+        onHearing: (text) => { heardEl.textContent = text; },
+        onTrouble: (message) => log(message, "bad"),
+      });
+      if (!ears) throw new Error("This browser has no built-in dictation. Use Safari on the phone.");
+
+      listenForResults(fromClaude);
+      ears.start();
+      setState("listening — just talk");
+      goBtn.textContent = "Stop";
+      goBtn.className = "live";
+      goBtn.disabled = false;
+      log("ready — nothing here is billed", "work");
+    },
+    stop() {
+      ears?.stop(); ears = null;
+      mouth?.silence();
+      results?.close(); results = null;
+      stopWork();
+      working = false;
+      heardEl.textContent = "";
+    },
+    // Tapping the button while it talks means "be quiet", not "hang up".
+    tapWhileLive() {
+      if (mouth?.busy) { mouth.silence(); return true; }
+      return false;
+    },
+  };
+}
+
+// ------------------------------------------------------- the paid front end
+//
+// The original: one model does the hearing and the speaking inside a single billed
+// audio stream. Kept because natural interruption is genuinely better — it is simply
+// not worth its price for most drives.
+
+function realtimeFrontEnd() {
+  let pc = null, dc = null, live = false;
+  let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = null;
+  let lastSpokeAt = 0;
+  const PROGRESS_MIN_GAP_MS = 25_000;
+
+  // Every time you speak, the whole conversation so far is billed again, so a long
+  // drive gets steadily more expensive. The voice model is only a mouthpiece —
+  // everything that matters is remembered by Claude on the Mac — so we throw away
+  // its older turns and keep the cost flat. Nothing real is lost.
+  const KEEP_TURNS = 10;
+  const itemIds = [];
+
+  function sendEvent(obj) {
+    if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+  }
+
+  function trimConversation() {
+    while (itemIds.length > KEEP_TURNS) {
+      sendEvent({ type: "conversation.item.delete", item_id: itemIds.shift() });
+    }
+  }
+
+  function speakThrough(note) {
+    sendEvent({
+      type: "conversation.item.create",
+      item: { type: "message", role: "user", content: [{ type: "input_text", text: note }] },
+    });
+    sendEvent({ type: "response.create" });
+    lastSpokeAt = Date.now();
+  }
+
+  const TOOLS = [
+    {
+      type: "function",
+      name: "ask_claude",
+      description:
+        "Hand a request to Claude, which reads and reasons about the user's real code on their machine. " +
+        "Use this for ANY question or instruction about their code, project, tests, commits, or tools — " +
+        "you have no knowledge of these yourself. Returns immediately; the answer arrives later and you " +
+        "will be told to speak it.",
+      parameters: {
+        type: "object",
+        properties: {
+          request: {
+            type: "string",
+            description:
+              "What the user wants, in full, as an instruction to a capable engineer. Include anything " +
+              "from earlier in the conversation that is needed to make sense of it on its own.",
+          },
+        },
+        required: ["request"],
+      },
+    },
+    {
+      type: "function",
+      name: "stop_claude",
+      description: "Stop whatever Claude is currently doing. Use when the user says stop.",
+      parameters: { type: "object", properties: {} },
+    },
+  ];
+
+  async function configureSession() {
+    instructionsCache ??= await (await fetch("/instructions")).text();
+    sendEvent({
+      type: "session.update",
+      session: { type: "realtime", instructions: instructionsCache, tools: TOOLS, tool_choice: "auto" },
+    });
+  }
+
+  function answerTool(callId, output) {
+    sendEvent({
+      type: "conversation.item.create",
+      item: { type: "function_call_output", call_id: callId, output },
+    });
+    sendEvent({ type: "response.create" });
+    lastSpokeAt = Date.now();
+  }
+
+  async function onVoiceEvent(event) {
+    switch (event.type) {
+      case "response.function_call_arguments.done": {
+        const args = JSON.parse(event.arguments || "{}");
+        if (event.name === "ask_claude") {
+          log(`you: ${args.request}`, "you");
+          await ask(args.request);
+          answerTool(event.call_id, "Started. Say one short sentence to acknowledge, then wait quietly.");
+        } else if (event.name === "stop_claude") {
+          await stopWork();
+          log("stopped", "work");
+          answerTool(event.call_id, "Stopped.");
+        }
+        break;
+      }
+      case "conversation.item.created":
+      case "conversation.item.added":
+        if (event.item?.id) itemIds.push(event.item.id);
+        break;
+      case "response.done":
+        lastSpokeAt = Date.now();
+        trimConversation(); // only between turns, never mid-sentence
+        break;
+      case "error":
+        log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
+        break;
+    }
+  }
+
+  function fromClaude(kind, text) {
     if (kind === "progress") {
       log(text, "work");
       // Only interrupt with progress if it's been quiet for a while.
@@ -195,145 +513,182 @@ function listenForResults() {
       }
       return;
     }
-
     if (kind === "final") {
-      log(text.slice(0, 400), "");
+      log(text.slice(0, 400));
       speakThrough(
         `[Claude has finished and this is its answer. Speak it to the user following your speaking rules — ` +
         `plain words, no code, lead with the outcome, findings one at a time. Do not read it verbatim.\n\n${text}]`
       );
       return;
     }
-
     if (kind === "error") {
       log(text, "bad");
       speakThrough(`[Something went wrong: ${text}. Tell the user in one plain sentence and ask what they want to do.]`);
     }
-  };
-  events.onerror = () => setState("lost the link to the Mac — retrying");
-}
-
-// ------------------------------------------------------------------ connect
-
-// A dropped connection is the most likely way a real drive falls apart — a tunnel,
-// a cell handoff, a dead spot. Nothing here should ever require taking the phone
-// out of a pocket, so we simply keep trying until we're back.
-
-async function connect({ resume }) {
-  setState(resume ? "reconnecting…" : "connecting…");
-
-  const url = resume ? "/token?resume=1" : "/token";
-  const { secret } = await (await fetch(url, { method: "POST" })).json();
-  if (!secret) throw new Error("no voice credential");
-
-  // Ask for the microphone once and keep it. Asking again on every reconnect
-  // would prompt the user, which is exactly what we can't do at 70mph.
-  micStream ??= await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-
-  pc = new RTCPeerConnection();
-
-  const speaker = new Audio();
-  speaker.autoplay = true;
-  pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
-  pc.addTrack(micStream.getTracks()[0], micStream);
-
-  pc.onconnectionstatechange = () => {
-    if (!live) return;
-    if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-      log(`connection ${pc.connectionState}`, "bad");
-      scheduleReconnect();
-    }
-  };
-
-  dc = pc.createDataChannel("oai-events");
-  dc.onopen = async () => {
-    itemIds.length = 0; // a new voice session — old turn identifiers are stale
-    await configureSession();
-    const wasReconnect = resume;
-    attempt = 0;
-    live = true;
-    setState("listening — just talk");
-    goBtn.textContent = "Stop";
-    goBtn.className = "live";
-    goBtn.disabled = false;
-    log(wasReconnect ? "reconnected" : "connected", "work");
-
-    if (wasReconnect) {
-      speakThrough(
-        "[You just reconnected after the network dropped. Claude's work and your " +
-        "conversation with the user are both intact. Say briefly that you're back, then wait.]"
-      );
-    }
-  };
-  dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
-    method: "POST",
-    headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
-    body: offer.sdp,
-  });
-  if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
-
-  await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
-
-  if (!events) listenForResults();
-}
-
-function scheduleReconnect() {
-  if (!live || reconnectTimer) return;
-
-  try { pc?.close(); } catch {}
-  pc = null; dc = null;
-
-  const wait = Math.min(1000 * 2 ** attempt, 10_000);
-  attempt += 1;
-  setState(`connection lost — retrying in ${Math.round(wait / 1000)}s`);
-
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    if (!live) return;
-    try {
-      await connect({ resume: true });
-    } catch (err) {
-      log(String(err.message ?? err), "bad");
-      scheduleReconnect();
-    }
-  }, wait);
-}
-
-async function start() {
-  goBtn.disabled = true;
-  live = true;      // set before connecting so a drop mid-handshake still retries
-  attempt = 0;
-  try {
-    await connect({ resume: false });
-  } catch (err) {
-    log(String(err.message ?? err), "bad");
-    scheduleReconnect();
   }
+
+  // A dropped connection is the most likely way a real drive falls apart — a tunnel,
+  // a cell handoff, a dead spot. Nothing here should ever require taking the phone
+  // out of a pocket, so we simply keep trying until we're back.
+  async function connect({ resume }) {
+    setState(resume ? "reconnecting…" : "connecting…");
+
+    const url = resume ? "/token?resume=1" : "/token";
+    const { secret, error } = await (await fetch(url, { method: "POST" })).json();
+    if (!secret) throw new Error(error ?? "no voice credential");
+
+    // Ask for the microphone once and keep it. Asking again on every reconnect
+    // would prompt the user, which is exactly what we can't do at 70mph.
+    micStream ??= await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+
+    pc = new RTCPeerConnection();
+
+    const speaker = new Audio();
+    speaker.autoplay = true;
+    pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
+    pc.addTrack(micStream.getTracks()[0], micStream);
+
+    pc.onconnectionstatechange = () => {
+      if (!live) return;
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        log(`connection ${pc.connectionState}`, "bad");
+        scheduleReconnect();
+      }
+    };
+
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = async () => {
+      itemIds.length = 0; // a new voice session — old turn identifiers are stale
+      await configureSession();
+      attempt = 0;
+      live = true;
+      setState("listening — just talk");
+      goBtn.textContent = "Stop";
+      goBtn.className = "live";
+      goBtn.disabled = false;
+      log(resume ? "reconnected" : "connected — this mode is billed per minute", "work");
+
+      if (resume) {
+        speakThrough(
+          "[You just reconnected after the network dropped. Claude's work and your " +
+          "conversation with the user are both intact. Say briefly that you're back, then wait.]"
+        );
+      }
+    };
+    dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
+      body: offer.sdp,
+    });
+    if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
+
+    await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
+
+    if (!results) listenForResults(fromClaude);
+  }
+
+  function scheduleReconnect() {
+    if (!live || reconnectTimer) return;
+
+    try { pc?.close(); } catch {}
+    pc = null; dc = null;
+
+    const wait = Math.min(1000 * 2 ** attempt, 10_000);
+    attempt += 1;
+    setState(`connection lost — retrying in ${Math.round(wait / 1000)}s`);
+
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      if (!live) return;
+      try {
+        await connect({ resume: true });
+      } catch (err) {
+        log(String(err.message ?? err), "bad");
+        scheduleReconnect();
+      }
+    }, wait);
+  }
+
+  return {
+    async start() {
+      live = true; // set before connecting so a drop mid-handshake still retries
+      attempt = 0;
+      try {
+        await connect({ resume: false });
+      } catch (err) {
+        log(String(err.message ?? err), "bad");
+        scheduleReconnect();
+      }
+    },
+    stop() {
+      live = false;
+      clearTimeout(reconnectTimer); reconnectTimer = null;
+      try { pc?.close(); } catch {}
+      pc = null; dc = null;
+      results?.close(); results = null;
+      micStream?.getTracks().forEach((t) => t.stop());
+      micStream = null;
+      stopWork();
+    },
+    tapWhileLive: () => false,
+  };
 }
 
-function stop() {
-  live = false;
-  clearTimeout(reconnectTimer); reconnectTimer = null;
-  try { pc?.close(); } catch {}
-  pc = null; dc = null;
-  events?.close(); events = null;
-  micStream?.getTracks().forEach((t) => t.stop());
-  micStream = null;
-  fetch("/stop", { method: "POST" }).catch(() => {});
-  setState("not connected");
-  goBtn.textContent = "Start talking";
-  goBtn.className = "";
-  goBtn.disabled = false;
-}
+// ------------------------------------------------------------------- the button
 
-goBtn.onclick = () => (live ? stop() : start());
+const frontEnd = setup.mode === "realtime" ? realtimeFrontEnd() : splitFrontEnd();
+let running = false;
+
+// The screen locking mid-drive would end the session, so ask the phone to keep it on
+// while this page is in front. It is a request, not a guarantee.
+let wakeLock = null;
+async function holdScreenAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (running && document.visibilityState === "visible") holdScreenAwake();
+});
+
+setState(
+  setup.mode === "realtime"
+    ? `ready — paid voice, working on ${setup.project}`
+    : `ready — free voice, working on ${setup.project}`
+);
+
+goBtn.onclick = async () => {
+  if (running) {
+    if (frontEnd.tapWhileLive()) return; // it was talking; that tap just hushed it
+    running = false;
+    frontEnd.stop();
+    wakeLock?.release?.(); wakeLock = null;
+    setState("not connected");
+    goBtn.textContent = "Start talking";
+    goBtn.className = "";
+    goBtn.disabled = false;
+    return;
+  }
+
+  running = true;
+  goBtn.disabled = true;
+  holdScreenAwake();
+  try {
+    await frontEnd.start();
+  } catch (err) {
+    running = false;
+    log(String(err.message ?? err), "bad");
+    setState("not connected");
+    goBtn.textContent = "Start talking";
+    goBtn.className = "";
+    goBtn.disabled = false;
+  }
+};
 </script>
 </body>
 </html>

@@ -50,13 +50,19 @@ export function stopWork() {
 /**
  * Hand a request to Claude. Returns immediately; results arrive through `emit`.
  * emit(kind, text) where kind is "progress" | "final" | "error".
+ *
+ * `briefing` is how Claude is told to answer — plain spoken sentences rather than a
+ * written report. It only goes out on the first request of a conversation, because
+ * every later one continues that same conversation and Claude still has it.
  */
-export function startWork(request, emit) {
+export function startWork(request, emit, { briefing = "" } = {}) {
   if (current) stopWork();
+
+  const opening = briefing && !conversationId ? `${briefing}\n\n---\n\n${request}` : request;
 
   const args = [
     "-p",
-    request,
+    opening,
     "--output-format",
     "stream-json",
     "--verbose",

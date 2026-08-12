@@ -10,17 +10,34 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
-import { PORT, PROJECT_DIR, VOICE_MODEL, VOICE_NAME } from "./config.mjs";
+import {
+  LISTENER,
+  MODE,
+  PORT,
+  PROJECT_DIR,
+  SPEAKER,
+  SPEAKER_RATE,
+  SPEAKER_VOICE,
+  VOICE_MODEL,
+  VOICE_NAME,
+} from "./config.mjs";
 import { forgetConversation, startWork, stopWork } from "./claude-bridge.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 
+// Only the paid mode needs a paid credential. Demanding one in the free mode would
+// be a quiet insistence that you keep an account you are trying not to spend on.
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_KEY) {
-  console.error("OPENAI_API_KEY is not set. Set it and try again.");
+if (MODE === "realtime" && !OPENAI_KEY) {
+  console.error("Realtime mode needs OPENAI_API_KEY. Set it, or leave the free mode on.");
   process.exit(1);
 }
+
+// The speaking rules only matter when nothing sits between Claude and the speaker.
+// In realtime mode the voice model rewrites Claude's answer, and applies its own.
+const briefing =
+  MODE === "realtime" ? "" : fs.readFileSync(path.join(here, "spoken-answer-rules.md"), "utf8");
 
 // ---------------------------------------------------------------- listeners
 
@@ -94,7 +111,23 @@ async function handle(req, res) {
     return send(res, 200, text, "text/plain; charset=utf-8");
   }
 
+  // The phone asks what it is meant to be before it does anything, so that changing
+  // the voice layer is a setting on the Mac and never an edit to the page.
+  if (url.pathname === "/setup") {
+    return send(res, 200, {
+      mode: MODE,
+      listener: LISTENER,
+      speaker: SPEAKER,
+      speakerVoice: SPEAKER_VOICE,
+      speakerRate: SPEAKER_RATE,
+      project: path.basename(PROJECT_DIR),
+    });
+  }
+
   if (url.pathname === "/token" && req.method === "POST") {
+    if (MODE !== "realtime") {
+      return send(res, 409, { error: "this server is running the free voice mode" });
+    }
     try {
       // A fresh start wipes the slate; a reconnect after a dropped signal must not,
       // or a tunnel would cost you everything Claude had established.
@@ -110,11 +143,24 @@ async function handle(req, res) {
     const { request } = await readBody(req);
     if (!request) return send(res, 400, { error: "no request" });
     console.log(`\n→ ${request}`);
-    startWork(request, (kind, text) => {
-      console.log(`  ${kind}: ${text.slice(0, 120)}`);
-      broadcast(kind, text);
-    });
+    startWork(
+      request,
+      (kind, text) => {
+        console.log(`  ${kind}: ${text.slice(0, 120)}`);
+        broadcast(kind, text);
+      },
+      { briefing },
+    );
     return send(res, 202, { started: true });
+  }
+
+  // Start the drive over. In realtime mode this happens as a side effect of asking
+  // for a fresh credential; in split mode there is no credential, so it is its own
+  // request.
+  if (url.pathname === "/new" && req.method === "POST") {
+    forgetConversation();
+    console.log("  starting a fresh conversation");
+    return send(res, 200, { ok: true });
   }
 
   if (url.pathname === "/stop" && req.method === "POST") {
@@ -216,8 +262,14 @@ const server = net.createServer((socket) => {
 server.listen(PORT, () => {
   console.log(`\nvoice-claude is up.`);
   console.log(`Working on:  ${PROJECT_DIR}`);
-  console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
-  console.log(`\nOpen this on the phone, on the same wifi:`);
+  if (MODE === "realtime") {
+    console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
+    console.log(`Cost:        billed per minute of audio, both directions.`);
+  } else {
+    console.log(`Voice:       the phone's own dictation and voices (${LISTENER}/${SPEAKER})`);
+    console.log(`Cost:        nothing beyond the Claude subscription.`);
+  }
+  console.log(`\nOpen this on the phone:`);
   for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
   console.log(`\nSafari will warn about the certificate the first time. Accept it.\n`);
 });

@@ -6,6 +6,8 @@
   "description": "A spoken front end to Claude Code, for reviewing and steering code while driving.",
   "scripts": {
     "start": "node server/index.mjs",
+    "check": "node server/self-check.mjs",
+    "start:paid": "VOICE_CLAUDE_MODE=realtime node server/index.mjs",
     "subscription:check": "node server/subscription-cli.mjs --check",
     "claude:subscription": "node server/subscription-cli.mjs",
     "claude:new": "node server/subscription-cli.mjs --new"

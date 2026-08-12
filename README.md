@@ -3,116 +3,147 @@
 A spoken front end to Claude Code, for reviewing and steering code while driving—headset on,
 phone in pocket, screen off.
 
-There are two front ends:
+The thinking is always Claude Code, running on this Mac against your real files, paid for by the
+Claude subscription. What changes between modes is only who does the hearing and the speaking, and
+what that costs.
 
-1. **Subscription mode:** ChatGPT Voice in the ChatGPT desktop app supplies speech and uses the
-   ChatGPT plan allowance; a repo skill delegates code questions to the signed-in Claude Code
-   subscription. This mode makes no OpenAI API calls.
-2. **Standalone web mode:** the original phone web page uses the OpenAI Realtime API and is billed
-   through `OPENAI_API_KEY`.
+| Mode | Hearing and speaking | Cost |
+| --- | --- | --- |
+| **Free voice** (default) | the phone's own dictation and voices | nothing |
+| **Paid voice** | OpenAI's realtime speech-to-speech model | billed per minute, both directions |
+| **ChatGPT Voice** | ChatGPT itself, delegating to Claude | ChatGPT plan allowance; unproven, see below |
 
-## Subscription mode—no OpenAI API billing
+## Free voice mode—the default
 
-This is the supported way to use both subscriptions. A ChatGPT subscription does not provide an API
-credential that the standalone web page can use, so subscription mode uses ChatGPT Voice itself as
-the front end:
+Hearing and speaking are two separate jobs. Only the realtime model forces them together, inside a
+single billed audio stream, and that convenience was the entire cost of this project. So the default
+keeps them apart and buys each half from the phone, for nothing:
 
 ```text
-ChatGPT Voice (desktop or paired phone)
-        → Codex project task
-        → repo skill
-        → local Claude Code CLI
-        → Claude subscription
+your voice → the phone's own dictation → this Mac → Claude Code → the phone's own voice
 ```
 
-### Prerequisites
+Nothing is sent to OpenAI, and no credential is needed. Only the text of your question leaves the
+phone, and it goes to your own Mac.
 
-- A ChatGPT plan with ChatGPT Voice and Codex access.
-- The ChatGPT desktop app on the Mac.
-- Claude Code installed and signed into the Claude subscription without relying on
-  `ANTHROPIC_API_KEY`.
-
-The bridge deliberately removes `ANTHROPIC_API_KEY` and requires `claude auth status` to report both
-`authMethod: claude.ai` and a non-empty `subscriptionType`. Sign in once and choose the Claude.ai
-subscription option—not Claude Console/API billing:
+### Running it
 
 ```bash
-env -u ANTHROPIC_API_KEY claude auth login
-npm run subscription:check
+npm start
 ```
 
-### Start a voice session
+Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
+so Safari warns the first time; accept it and it stays accepted.
 
-1. Add this repository as a local project in the ChatGPT desktop app.
-2. Open a new, empty Codex task and start it in voice mode. Voice must be enabled before the first
-   message; a task that starts as text offers dictation instead.
-3. Say, “Use delegate to Claude to review the current change,” or select the
-   `delegate-to-claude` skill explicitly.
+Then just talk. It listens continuously, hands each thing you say to Claude, and reads the answer
+back. Five words are handled on the phone rather than sent anywhere: **stop** (be quiet and abandon
+the work), **wait** (be quiet, keep the work), **repeat**, **start over** (forget the drive so far),
+and any of their obvious synonyms. They only count when said on their own, so a sentence that
+happens to contain "stop" is still just a sentence. Tapping the big button while it is talking also
+shuts it up without ending the session.
 
-The skill runs:
+Because there is no longer a model in between to rewrite Claude's answer, Claude itself is told to
+write speech rather than prose—short, no markdown, no code read aloud, findings one at a time. Those
+rules are in `server/spoken-answer-rules.md` and are sent once at the start of a drive.
+
+### What you give up
+
+Natural interruption. The realtime model could be cut off mid-sentence and would start listening;
+here you either wait for a pause or say "stop". That is the honest price of not paying per minute.
+
+Also, a web page on an iPhone is suspended when the screen locks, so this does not yet deliver
+"phone in pocket, screen off"—see issue #2. Real drives with the screen on come first anyway (#1).
+
+### Changing the voice
 
 ```bash
-npm run claude:subscription -- --request "the complete request"
+VOICE_CLAUDE_SPEAKER_VOICE=samantha VOICE_CLAUDE_SPEAKER_RATE=1.2 npm start
 ```
 
-Claude's session id is retained per configured project under the ignored `.voice-claude/`
-directory, so “next” and “explain that” keep their context. Reset it with `npm run claude:new`.
+The names are matched loosely against whatever voices the phone offers. Leave the voice empty to let
+the phone choose. A paid speech service would slot into either half as another name in
+`server/config.mjs` and would change nothing else.
 
-By default Claude inspects `~/Code/Advisor-LLM`. Point it at another project when starting ChatGPT
-or before invoking the skill:
+### Which project it talks about
 
 ```bash
 export VOICE_CLAUDE_PROJECT=/absolute/path/to/project
 ```
 
-For phone access, pair the ChatGPT mobile app with this Mac using **Settings → Connections →
-Control this Mac or PC** in the desktop app, then open **Remote** on the phone. The Mac must remain
-awake, online, and running the desktop app. Permissions and approval prompts still apply remotely,
-so keep Claude's read-only tool allowlist narrow.
+Defaults to `~/Code/Advisor-LLM`.
 
-ChatGPT Voice has plan-dependent limits, and tasks it starts also consume the plan's Codex usage
-budget. This avoids per-call OpenAI API billing; it does not make either subscription unlimited.
+### Checking it still works
 
-## Standalone web mode—OpenAI API billed
+```bash
+npm run check
+```
 
-The original architecture remains available when the custom web interface and direct WebRTC audio
-path are required.
+Boots the server with no OpenAI credential in the environment at all and checks the parts that are
+easy to break and hard to notice until you are already moving.
 
-### What this mode is
+## Paid voice mode—billed per minute
+
+The original architecture. One premium model does the hearing and the speaking inside a single audio
+stream, which buys genuinely natural turn-taking and interruption.
+
+```bash
+export OPENAI_API_KEY=...
+npm run start:paid
+```
 
 Three parts, deliberately separated:
 
-- **The ears and mouth** — OpenAI's Realtime voice model. It holds the conversation: continuous
-  listening, natural turn-taking, and interruption. It never sees your code.
+- **The ears and mouth** — OpenAI's Realtime voice model. It holds the conversation and never sees
+  your code.
 - **The brain** — Claude Code, running on this Mac against your real files.
 - **The manners** — the spoken-answer rules and fixed command words in
   `server/voice-instructions.md`.
 
-The voice model has one capability: hand a request to Claude and later speak back what Claude says.
-
-### Why work is handed over asynchronously
-
-Claude can take seconds or minutes on real work. Handoff returns immediately, and Claude's progress
-and final answer arrive later and are spoken when ready.
-
-### Running it
-
-```bash
-export OPENAI_API_KEY=...
-node server/index.mjs
-```
-
-Then open the printed address on the phone, on the same Wi-Fi, and press Start.
-
 ### Cost
 
-The Realtime voice side is API-billed for audio in both directions. Long conversations resend
-history, so the web client keeps only the last few turns. The default voice model is the smaller,
-cheaper one; see `server/config.mjs`.
+Audio is billed in both directions for as long as the line is open: roughly two to five cents a
+minute at best on the smaller voice, and several times that once the conversation is long, because
+history is resent. A one-hour drive is a dollar or three. The web client throws away older turns to
+keep that flat. This is the mode the free one exists to replace.
 
-The Claude bridge removes `ANTHROPIC_API_KEY` from the child process. Run
-`npm run subscription:check` before driving to confirm that Claude Code has a separate subscription
-login; otherwise the bridge fails instead of silently using API billing.
+## ChatGPT Voice mode—unproven
+
+The idea: ChatGPT Voice supplies the speech from your ChatGPT plan, and a skill in this repo hands
+code questions to the local Claude Code subscription, so neither side is billed per call.
+
+```text
+ChatGPT Voice → a coding task on this Mac → repo skill → local Claude Code → Claude subscription
+```
+
+**It does not work from an ordinary ChatGPT conversation**, and that is not a bug to fix. A plain
+chat has no way to run anything on this machine, so there is nothing for it to reach Claude through;
+asked directly, it will tell you truthfully that it is not connected to your Mac. The delegation can
+only happen in the coding-task surface of the ChatGPT desktop app, with this folder added there as a
+project.
+
+Whether such a task can be *started* by voice is the untested part. Try it in text first: start a
+task on this folder and type "have Claude review the current change." If Claude genuinely answers
+about your real files, the machinery is sound and only the voice trigger is in question.
+
+The local half is verifiable on its own:
+
+```bash
+env -u ANTHROPIC_API_KEY claude auth login   # choose the Claude.ai subscription, not API billing
+npm run subscription:check
+npm run claude:subscription -- --request "the complete request"
+npm run claude:new                            # forget the saved conversation
+```
+
+The bridge deliberately removes `ANTHROPIC_API_KEY` and requires `claude auth status` to report both
+`authMethod: claude.ai` and a non-empty `subscriptionType`, so it fails loudly rather than quietly
+falling back to per-token billing.
+
+## Reaching the Mac from the road
+
+The phone does not have to be on the same wifi. Any private network of your own between phone and
+Mac works, and the server prints every address it can be reached on, including those. Do not expose
+the page to the public internet: it has no password, and anyone who found it could read your code
+through Claude.
 
 ## Safety default
 
