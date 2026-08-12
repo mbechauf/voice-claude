@@ -111,6 +111,7 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
   let recognition = null;
   let wanted = false;
   let restartTimer = null;
+  let inFlight = "";   // heard, but not yet confirmed by the phone
 
   function build() {
     const r = new Recognition();
@@ -124,17 +125,31 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
         const text = (result[0]?.transcript ?? "").trim();
         if (!text) continue;
         if (result.isFinal) {
+          inFlight = "";
           onHeard(text);
         } else {
+          // Held on to, because the phone throws this away if it decides to stop
+          // listening before you have finished the sentence.
+          inFlight = text;
           onHearing(text);
           onPartialPhrase?.(text);
         }
       }
     };
 
-    // Silence and short drop-outs both arrive here. Neither is a problem; we simply
-    // start again. A refused microphone is the one case worth telling someone about.
-    r.onend = () => { if (wanted) restart(400); };
+    // The phone stops listening on its own after a couple of seconds of quiet, and
+    // when it does that it silently drops whatever it had half-heard. Pausing in the
+    // middle of a question would therefore lose the words you had just said, which
+    // looked exactly like it forgetting what you were talking about. So the half-
+    // heard words are kept and handed over here, and then it starts listening again.
+    r.onend = () => {
+      if (inFlight) {
+        const leftover = inFlight;
+        inFlight = "";
+        onHeard(leftover);
+      }
+      if (wanted) restart(120);
+    };
     r.onerror = (event) => {
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         wanted = false;
@@ -574,6 +589,13 @@ function splitFrontEnd() {
     setState(working ? `working — say "${setup.openPhrase}" to butt in` : `say "${setup.openPhrase}"`);
   }
 
+  // The gate only gives up if you have gone quiet altogether. Any word at all, even
+  // one it has not finished hearing, means you are still in the middle of asking.
+  function stillThere() {
+    clearTimeout(forgetTimer);
+    forgetTimer = setTimeout(closeGate, setup.openTimeout ?? 30_000);
+  }
+
   function openGate() {
     if (open) return;
     open = true;
@@ -583,6 +605,7 @@ function splitFrontEnd() {
     heardEl.textContent = "";
     setState(`listening — say "${setup.closePhrase}" when you're done`);
     goBtn.className = "open";
+    stillThere();
   }
 
   function closeGate() {
@@ -633,8 +656,7 @@ function splitFrontEnd() {
 
       collected.push(step.say);
       heardEl.textContent = collected.join(" ");
-      clearTimeout(forgetTimer);
-      forgetTimer = setTimeout(closeGate, setup.openTimeout ?? 30_000);
+      stillThere();
     }
   }
 
@@ -667,6 +689,7 @@ function splitFrontEnd() {
         onHearing: (text) => {
           if (!open) { heardEl.textContent = text; return; }
           heardEl.textContent = `${collected.join(" ")} ${text}`.trim();
+          stillThere();
         },
         // Waiting until you have finished a sentence to react is taking turns, not
         // being interrupted. So the opening phrase is acted on the instant it is

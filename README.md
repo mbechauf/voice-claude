@@ -54,7 +54,10 @@ passenger, thinking out loud—and a pause in the middle of a thought is not the
 Guessing wrong in either direction is exhausting, so it does not guess.
 
 - **Nothing is sent until you close.** Take as long as you like, pause, change your mind, start the
-  sentence again. It is all one question, and it goes when you say so.
+  sentence again. It is all one question, and it goes when you say so. The phone stops listening on
+  its own after a couple of seconds of quiet and throws away whatever it had half-heard when it
+  does, so those words are caught and kept before it is started again—otherwise pausing mid-question
+  loses the end of your sentence, which looks exactly like it forgetting what you were saying.
 - **Opening is also how you interrupt.** Say "Claude go" over an answer and it stops mid-sentence
   and takes down what you say next. It knows its own voice coming back off the windscreen from
   yours, so it will not interrupt itself.
