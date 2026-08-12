@@ -45,12 +45,20 @@ back to the phone's own rather than leaving you with silence in a car.
 Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
 so Safari warns the first time; accept it and it stays accepted.
 
-Then just talk. It listens continuously, hands each thing you say to Claude, and reads the answer
-back. Five words are handled on the phone rather than sent anywhere: **stop** (be quiet and abandon
-the work), **wait** (be quiet, keep the work), **repeat**, **start over** (forget the drive so far),
-and any of their obvious synonyms. They only count when said on their own, so a sentence that
-happens to contain "stop" is still just a sentence. Tapping the big button while it is talking also
-shuts it up without ending the session.
+Then just talk. It listens continuously—including while it is talking to you—hands each thing you
+say to Claude, and reads the answer back.
+
+**You can interrupt it.** Start talking over an answer and it stops mid-sentence and listens, and
+what you said becomes the next question. The microphone also hears the answer coming back off the
+windscreen, so anything heard while it speaks is compared against what it has just said and ignored
+if it is mostly the same words. That check is the difference between being able to interrupt and it
+arguing with itself all the way down the motorway, so `npm run check` exercises it directly.
+
+Four words are handled on the phone rather than sent anywhere: **stop** (be quiet and abandon the
+work), **wait** (be quiet, keep the work), **repeat**, and **start over** (forget the drive so far),
+plus their obvious synonyms. They only count when said on their own, so a sentence that happens to
+contain "stop" is still just a sentence. Tapping the big button while it is talking also shuts it
+up without ending the session.
 
 Because there is no longer a model in between to rewrite Claude's answer, Claude itself is told to
 write speech rather than prose—short, no markdown, no code read aloud, findings one at a time. Those
@@ -58,11 +66,12 @@ rules are in `server/spoken-answer-rules.md` and are sent once at the start of a
 
 ### What you give up
 
-Natural interruption. The realtime model could be cut off mid-sentence and would start listening;
-here you either wait for a pause or say "stop". That is the honest price of not paying per minute.
+Less than it first appeared. Interruption works. What is missing is the realtime model's sense of
+timing—it knew when you had finished a thought; here a pause is what ends your turn, so thinking out
+loud mid-sentence can send the question early.
 
-Also, a web page on an iPhone is suspended when the screen locks, so this does not yet deliver
-"phone in pocket, screen off"—see issue #2. Real drives with the screen on come first anyway (#1).
+A web page on an iPhone is also suspended when the screen locks, so this does not yet deliver "phone
+in pocket, screen off"—see issue #2. Real drives with the screen on come first anyway (#1).
 
 ### Changing the voice
 

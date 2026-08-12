@@ -172,6 +172,37 @@ function deviceEars({ onHeard, onHearing, onTrouble }) {
 // the end of a paragraph, and so nothing hits the phone's limit on how much it will
 // say in one go.
 
+// The microphone stays open while it is talking, which means it also hears itself
+// coming back off the windscreen. Both voices therefore keep a note of the last few
+// sentences they have said, so that what is heard can be checked against what was
+// just spoken. That check is what makes it safe to be interrupted mid-sentence.
+function recentlySpoken(keep = 3) {
+  const said = [];
+  return {
+    add(sentence) {
+      said.push(sentence);
+      while (said.length > keep) said.shift();
+    },
+    get text() { return said.join(" "); },
+  };
+}
+
+// Its own voice coming back is mostly its own words. Yours are not.
+function soundsLikeItself(heard, spoken) {
+  if (!spoken) return false;
+  const meaningfulWords = (text) =>
+    text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
+
+  const its = new Set(meaningfulWords(spoken));
+  const mine = meaningfulWords(heard);
+  // Nothing distinctive was said, and it is mid-sentence: far likelier to be the
+  // echo than a real instruction, and a wrongly ignored "mm" costs nothing.
+  if (!mine.length) return true;
+
+  const shared = mine.filter((word) => its.has(word)).length;
+  return shared / mine.length >= 0.5;
+}
+
 // Both voices read the same way: sentence by sentence, so that "stop" takes effect
 // within a breath rather than at the end of a paragraph, and so nothing hits the
 // limit on how much a phone will say in one go.
@@ -203,6 +234,7 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
   let queue = [];
   let speaking = false;
   let chosen = null;
+  const spoken = recentlySpoken();
 
   function pickVoice() {
     const voices = synth.getVoices();
@@ -231,7 +263,9 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
       onFinish?.();
       return;
     }
-    const utterance = new SpeechSynthesisUtterance(queue.shift());
+    const sentence = queue.shift();
+    spoken.add(sentence);
+    const utterance = new SpeechSynthesisUtterance(sentence);
     if (chosen) utterance.voice = chosen;
     utterance.rate = rate ?? 1;
     utterance.onend = next;
@@ -263,6 +297,7 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
       if (speaking) { speaking = false; onFinish?.(); }
     },
     get busy() { return speaking; },
+    get saying() { return spoken.text; },
   };
 }
 
@@ -281,6 +316,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
 
   let speaking = false;
   let abandoned = false;
+  const spoken = recentlySpoken();
 
   async function fetchSound(sentence) {
     const response = await fetch("/say", {
@@ -327,6 +363,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
 
       // Start making the next one while this one is being heard.
       pending = i + 1 < parts.length ? fetchSound(parts[i + 1]).catch(() => null) : null;
+      spoken.add(parts[i]);
       await play(sound);
       if (abandoned) break;
     }
@@ -359,6 +396,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
       if (speaking) { speaking = false; onFinish?.(); }
     },
     get busy() { return speaking || Boolean(fallback?.busy); },
+    get saying() { return [spoken.text, fallback?.saying ?? ""].join(" ").trim(); },
   };
 }
 
@@ -409,9 +447,14 @@ function splitFrontEnd() {
     heardEl.textContent = "";
     const command = commandIn(text);
 
-    // While it is speaking, only the command words count. Anything else it "hears"
-    // at that moment is almost always its own voice coming back in.
-    if (mouth?.busy && !command) return;
+    // Talking over it is how a real conversation works, so it has to be possible to
+    // start a new question mid-answer. The only thing that must not do it is the
+    // sound of its own voice, so anything heard while it talks is checked against
+    // what it has just said, and ignored if it is mostly the same words.
+    if (mouth?.busy && !command) {
+      if (soundsLikeItself(text, mouth.saying)) return;
+      mouth.silence();
+    }
 
     if (command === "stop") {
       mouth?.silence();
@@ -471,7 +514,15 @@ function splitFrontEnd() {
 
       ears = deviceEars({
         onHeard: heard,
-        onHearing: (text) => { heardEl.textContent = text; },
+        onHearing: (text) => {
+          heardEl.textContent = text;
+          // Waiting for the end of your sentence to stop talking is not being
+          // interrupted, it is taking turns. So the moment there are a couple of
+          // words that are plainly not its own, it goes quiet and lets you finish.
+          if (mouth?.busy && text.split(/\s+/).length >= 2 && !soundsLikeItself(text, mouth.saying)) {
+            mouth.silence();
+          }
+        },
         onTrouble: (message) => log(message, "bad"),
       });
       if (!ears) throw new Error("This browser has no built-in dictation. Use Safari on the phone.");

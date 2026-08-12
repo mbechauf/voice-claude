@@ -3,8 +3,9 @@
 // OpenAI credential in the environment: the free mode has to work for someone who
 // does not have one at all.
 
-import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,36 @@ const results = [];
 
 function check(name, passed, detail = "") {
   results.push({ name, passed, detail });
+}
+
+// Whether it can tell your voice from its own is what decides if interrupting it
+// works or if it argues with itself all the way down the motorway. It lives in the
+// page, so it is lifted out of there and exercised here rather than only in a car.
+function checkItKnowsItsOwnVoice() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const source = page.match(/function soundsLikeItself[\s\S]*?\n}/);
+  if (!source) {
+    check("the page can tell your voice from its own", false, "couldn't find that part of the page");
+    return;
+  }
+
+  const soundsLikeItself = new Function(`${source[0]}; return soundsLikeItself;`)();
+  const answer = "Another set of notes still says the adapter is the only copy of that file.";
+
+  const cases = [
+    ["hears itself word for word", answer, answer, true],
+    ["hears itself roughly", "another set of notes still says the adapter", answer, true],
+    ["hears you change the subject", "forget that, check the tests instead", answer, false],
+    ["hears you ask something new", "what about the billing problem from earlier", answer, false],
+    ["hears a noise with no words in it", "mm", answer, true],
+    ["hears you while it is silent", "check the tests instead", "", false],
+  ];
+
+  const wrong = cases.filter(([, heard, spoken, expected]) => soundsLikeItself(heard, spoken) !== expected);
+  for (const [name, heard, spoken, expected] of cases) {
+    check(`it ${name}`, soundsLikeItself(heard, spoken) === expected, expected ? "should ignore" : "should listen");
+  }
+  return wrong.length === 0;
 }
 
 async function waitForServer() {
@@ -104,6 +135,8 @@ try {
   }
 
   check("the banner says plainly that nothing is billed", banner.includes("nothing beyond the Claude subscription"));
+
+  checkItKnowsItsOwnVoice();
 } finally {
   server.kill("SIGTERM");
 }
