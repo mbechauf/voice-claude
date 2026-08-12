@@ -54,6 +54,7 @@ if (SPEAKER === "mac" && speaker !== "mac") {
 // ---------------------------------------------------------------- listeners
 
 const listeners = new Set();
+const trace = [];
 
 function broadcast(kind, text) {
   const payload = `data: ${JSON.stringify({ kind, text })}\n\n`;
@@ -186,6 +187,22 @@ async function handle(req, res) {
       { briefing },
     );
     return send(res, 202, { started: true });
+  }
+
+  // What the phone is actually doing, said out loud on the Mac. Dictation goes wrong
+  // in ways you cannot see from the driver's seat, and guessing from a description
+  // of the symptom wastes drives.
+  if (url.pathname === "/trace" && req.method === "POST") {
+    const { what, detail } = await readBody(req);
+    const line = `${new Date().toISOString().slice(11, 19)}  ${what}${detail ? `  ${detail}` : ""}`;
+    trace.push(line);
+    while (trace.length > 300) trace.shift();
+    console.log(`   · ${line}`);
+    return send(res, 204, "");
+  }
+
+  if (url.pathname === "/trace") {
+    return send(res, 200, trace.join("\n") || "nothing yet", "text/plain; charset=utf-8");
   }
 
   // Start the drive over. In realtime mode this happens as a side effect of asking

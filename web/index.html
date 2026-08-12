@@ -28,7 +28,15 @@
   /* While it is talking the whole button becomes a way to shut it up, because that
      is the one thing you want within reach without aiming. */
   button.talking { background: #5a4030; }
-  #heard { min-height: 1.5rem; color: #8fc7a8; font-size: 1.05rem; padding: 0.25rem 0; }
+  /* Dim when it is only overhearing you, bright when it is taking it down. The
+     difference has to be obvious at a glance, because mistaking one for the other is
+     what makes it feel like it is losing your words. */
+  #heard { min-height: 1.5rem; font-size: 1.05rem; padding: 0.25rem 0; color: #6b675e; }
+  #heard.keeping { color: #8fc7a8; }
+  #end {
+    background: none; border: 0; color: #6b675e; font-size: 0.85rem;
+    width: auto; padding: 0.5rem 0; margin: 0; text-decoration: underline;
+  }
   #log {
     flex: 1; overflow-y: auto; font-size: 0.9rem;
     border-top: 1px solid #2e2e26; padding-top: 0.75rem; margin-top: 0.25rem;
@@ -48,6 +56,7 @@
 <button id="go">Start talking</button>
 
 <div id="heard"></div>
+<button id="end" hidden>end session</button>
 <div id="log"></div>
 
 <script type="module">
@@ -55,6 +64,7 @@ const stateEl = document.getElementById("state");
 const heardEl = document.getElementById("heard");
 const logEl = document.getElementById("log");
 const goBtn = document.getElementById("go");
+const endBtn = document.getElementById("end");
 
 const setup = await (await fetch("/setup")).json();
 
@@ -82,6 +92,16 @@ function ask(request) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ request }),
   });
+}
+
+// Say what is happening back to the Mac. Nothing here waits for an answer, and a
+// failed note is never worth a word to the driver.
+function trace(what, detail = "") {
+  fetch("/trace", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ what, detail: String(detail).slice(0, 200) }),
+  }).catch(() => {});
 }
 
 const stopWork = () => fetch("/stop", { method: "POST" }).catch(() => {});
@@ -125,6 +145,7 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
         const text = (result[0]?.transcript ?? "").trim();
         if (!text) continue;
         if (result.isFinal) {
+          trace("heard (settled)", text);
           inFlight = "";
           onHeard(text);
         } else {
@@ -142,7 +163,9 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
     // middle of a question would therefore lose the words you had just said, which
     // looked exactly like it forgetting what you were talking about. So the half-
     // heard words are kept and handed over here, and then it starts listening again.
+    r.onstart = () => trace("dictation started");
     r.onend = () => {
+      trace("dictation stopped itself", inFlight ? `keeping "${inFlight}"` : "nothing in flight");
       if (inFlight) {
         const leftover = inFlight;
         inFlight = "";
@@ -151,6 +174,7 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
       if (wanted) restart(120);
     };
     r.onerror = (event) => {
+      trace("dictation error", event.error);
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         wanted = false;
         onTrouble("The phone won't give this page the microphone. Allow it in Safari's settings for this site.");
@@ -169,7 +193,8 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
       try {
         recognition = build();
         recognition.start();
-      } catch {
+      } catch (err) {
+        trace("could not start dictation", err.message ?? err);
         restart(800); // it was still shutting down; try again shortly
       }
     }, delay);
@@ -555,12 +580,8 @@ function beep(which) {
 
 function splitFrontEnd() {
   const talking = {
-    onStart: () => { goBtn.className = "talking"; goBtn.textContent = "Stop talking"; },
-    onFinish: () => {
-      goBtn.className = open ? "open" : "live";
-      goBtn.textContent = "Stop";
-      if (!open) idleState();
-    },
+    onStart: () => paint(),
+    onFinish: () => { paint(); if (!open) idleState(); },
   };
 
   // The phone's own voice is either the choice or the safety net, depending on what
@@ -585,8 +606,23 @@ function splitFrontEnd() {
   let collected = [];
   let forgetTimer = null;
 
+  // The button is the same gate the phrases open, and says which state it is in.
+  // Dictation is imperfect enough that there has to be a way through it that cannot
+  // be misheard — and knowing at a glance whether you are being taken down matters
+  // more than any of it.
+  function paint() {
+    if (mouth?.busy) { goBtn.textContent = "Quiet"; goBtn.className = "talking"; }
+    else if (open) { goBtn.textContent = "Send it"; goBtn.className = "open"; }
+    else { goBtn.textContent = "Ask something"; goBtn.className = "live"; }
+    heardEl.className = open ? "keeping" : "";
+  }
+
   function idleState() {
-    setState(working ? `working — say "${setup.openPhrase}" to butt in` : `say "${setup.openPhrase}"`);
+    setState(
+      working
+        ? `working — say "${setup.openPhrase}" or tap to butt in`
+        : `not recording — say "${setup.openPhrase}" or tap the button`,
+    );
   }
 
   // The gate only gives up if you have gone quiet altogether. Any word at all, even
@@ -603,14 +639,15 @@ function splitFrontEnd() {
     mouth?.silence();       // opening the gate is also how you cut it off
     beep("open");
     heardEl.textContent = "";
-    setState(`listening — say "${setup.closePhrase}" when you're done`);
-    goBtn.className = "open";
+    setState(`recording — say "${setup.closePhrase}" or tap when you're done`);
+    paint();
     stillThere();
+    trace("GATE OPEN");
   }
 
   function closeGate() {
+    trace("GATE CLOSE", open ? `collected "${collected.join(" ")}"` : "was already shut");
     clearTimeout(forgetTimer);
-    goBtn.className = "live";
     if (!open) {
       // Closing something that was never opened means "be quiet and drop it".
       mouth?.silence();
@@ -652,7 +689,7 @@ function splitFrontEnd() {
 
       // Words with the gate shut were not meant for it. This is the whole point:
       // the radio, a passenger and thinking out loud all land here and go nowhere.
-      if (!open) continue;
+      if (!open) { trace("ignored (gate shut)", step.say); continue; }
 
       collected.push(step.say);
       heardEl.textContent = collected.join(" ");
@@ -708,12 +745,11 @@ function splitFrontEnd() {
 
       listenForResults(fromClaude);
       ears.start();
-      goBtn.textContent = "Stop";
-      goBtn.className = "live";
       goBtn.disabled = false;
+      paint();
       idleState();
       log(
-        `ready — say "${setup.openPhrase}", ask, then say "${setup.closePhrase}"`,
+        `ready — say "${setup.openPhrase}" or tap the button, ask, then say "${setup.closePhrase}"`,
         "work",
       );
     },
@@ -728,10 +764,13 @@ function splitFrontEnd() {
       working = false;
       heardEl.textContent = "";
     },
-    // Tapping the button while it talks means "be quiet", not "hang up".
-    tapWhileLive() {
-      if (mouth?.busy) { mouth.silence(); return true; }
-      return false;
+    // The same three things the phrases do, for when dictation is having a bad day
+    // or the road is too loud to be heard over.
+    tap() {
+      if (mouth?.busy) { mouth.silence(); trace("tapped: quiet"); return; }
+      if (open) { trace("tapped: send"); closeGate(); return; }
+      trace("tapped: open");
+      openGate();
     },
   };
 }
@@ -983,7 +1022,9 @@ function realtimeFrontEnd() {
       micStream = null;
       stopWork();
     },
-    tapWhileLive: () => false,
+    // This mode hears you continuously and has no gate, so the button has nothing to
+    // toggle. It is still the fastest way to shut it up.
+    tap: () => speakThrough("[The user pressed quiet. Stop talking and wait.]"),
   };
 }
 
@@ -1008,32 +1049,38 @@ setState(
     : `ready — free voice, working on ${setup.project}`
 );
 
+function backToStopped() {
+  running = false;
+  wakeLock?.release?.(); wakeLock = null;
+  setState("not connected");
+  goBtn.textContent = "Start talking";
+  goBtn.className = "";
+  goBtn.disabled = false;
+  endBtn.hidden = true;
+  heardEl.textContent = "";
+  heardEl.className = "";
+}
+
+// While it is running the big button is the gate, not a hang-up. Ending the session
+// is the rare thing, so it gets the small link and cannot be hit by accident.
 goBtn.onclick = async () => {
-  if (running) {
-    if (frontEnd.tapWhileLive()) return; // it was talking; that tap just hushed it
-    running = false;
-    frontEnd.stop();
-    wakeLock?.release?.(); wakeLock = null;
-    setState("not connected");
-    goBtn.textContent = "Start talking";
-    goBtn.className = "";
-    goBtn.disabled = false;
-    return;
-  }
+  if (running) return frontEnd.tap();
 
   running = true;
   goBtn.disabled = true;
   holdScreenAwake();
   try {
     await frontEnd.start();
+    endBtn.hidden = false;
   } catch (err) {
-    running = false;
     log(String(err.message ?? err), "bad");
-    setState("not connected");
-    goBtn.textContent = "Start talking";
-    goBtn.className = "";
-    goBtn.disabled = false;
+    backToStopped();
   }
+};
+
+endBtn.onclick = () => {
+  frontEnd.stop();
+  backToStopped();
 };
 </script>
 </body>
