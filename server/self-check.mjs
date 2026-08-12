@@ -61,6 +61,48 @@ function checkItKnowsItsOwnVoice() {
   return wrong.length === 0;
 }
 
+// The gate decides what ever reaches Claude, and getting it wrong means either a
+// machine that ignores you or one that acts on the radio. Same trick as above: the
+// part of the page that reads speech into instructions is lifted out and run here.
+function checkTheGate() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const pieces = ["function howItSounds", "function nearlySame", "function phraseStartsAt", "const plainWords", "function readAsInstructions"]
+    .map((start) => page.match(new RegExp(`${start}[\\s\\S]*?\\n}`)))
+    .filter(Boolean)
+    .map((m) => m[0]);
+
+  if (pieces.length !== 5) {
+    check("the page can be read for the gate", false, `found ${pieces.length} of 5 parts`);
+    return;
+  }
+
+  const read = new Function(`${pieces.join("\n")}; return readAsInstructions;`)();
+  const shape = (text) =>
+    read(text, "claude go", "claude stop")
+      .map((step) => (step.open ? "OPEN" : step.close ? "CLOSE" : step.say))
+      .join(" | ");
+
+  const cases = [
+    ["a whole question in one breath", "claude go review the last change claude stop", "OPEN | review the last change | CLOSE"],
+    ["a question said over three goes", "claude go", "OPEN"],
+    ["talk with the gate shut is nothing to act on", "so anyway the traffic is terrible", "so anyway the traffic is terrible"],
+    ["the name misheard as cloud", "cloud go what changed cloud stop", "OPEN | what changed | CLOSE"],
+    ["the name misheard as clawed", "clawed go check the tests clawed stop", "OPEN | check the tests | CLOSE"],
+    ["the name misheard as clod", "clod go check the tests clod stop", "OPEN | check the tests | CLOSE"],
+    ["the name misheard as cold", "cold go check the tests cold stop", "OPEN | check the tests | CLOSE"],
+    ["a different short word is not the name", "go stop that", "go stop that"],
+    ["punctuation from dictation", "Claude, go. Review the tests. Claude, stop.", "OPEN | review the tests | CLOSE"],
+    ["closing without opening", "claude stop", "CLOSE"],
+    ["the word claude on its own is not a phrase", "claude found three things", "claude found three things"],
+    ["stop inside a sentence stays a word", "claude go make it stop crashing claude stop", "OPEN | make it stop crashing | CLOSE"],
+  ];
+
+  for (const [name, spoken, expected] of cases) {
+    const got = shape(spoken);
+    check(`the gate handles ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+  }
+}
+
 async function waitForServer() {
   for (let i = 0; i < 50; i += 1) {
     try {
@@ -136,7 +178,10 @@ try {
 
   check("the banner says plainly that nothing is billed", banner.includes("nothing beyond the Claude subscription"));
 
+  check("tells the phone the phrases that open and close the gate", Boolean(setup.openPhrase && setup.closePhrase), `${setup.openPhrase} / ${setup.closePhrase}`);
+
   checkItKnowsItsOwnVoice();
+  checkTheGate();
 } finally {
   server.kill("SIGTERM");
 }

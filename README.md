@@ -45,19 +45,33 @@ back to the phone's own rather than leaving you with silence in a car.
 Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
 so Safari warns the first time; accept it and it stays accepted.
 
-Then just talk. It listens continuously—including while it is talking to you—hands each thing you
-say to Claude, and reads the answer back.
+Then say **"Claude go"**, ask for what you want, and say **"Claude stop"**. Nothing else you say in
+the car ever reaches Claude.
 
-**You can interrupt it.** Start talking over an answer and it stops mid-sentence and listens, and
-what you said becomes the next question. The microphone also hears the answer coming back off the
-windscreen, so anything heard while it speaks is compared against what it has just said and ignored
-if it is mostly the same words. That check is the difference between being able to interrupt and it
-arguing with itself all the way down the motorway, so `npm run check` exercises it directly.
+That gate is the whole design, and it replaced an earlier version that tried to work out for itself
+when you were talking to it. A car is full of talk that was never meant for the machine—the radio, a
+passenger, thinking out loud—and a pause in the middle of a thought is not the end of a question.
+Guessing wrong in either direction is exhausting, so it does not guess.
 
-Four words are handled on the phone rather than sent anywhere: **stop** (be quiet and abandon the
-work), **wait** (be quiet, keep the work), **repeat**, and **start over** (forget the drive so far),
-plus their obvious synonyms. They only count when said on their own, so a sentence that happens to
-contain "stop" is still just a sentence. Tapping the big button while it is talking also shuts it
+- **Nothing is sent until you close.** Take as long as you like, pause, change your mind, start the
+  sentence again. It is all one question, and it goes when you say so.
+- **Opening is also how you interrupt.** Say "Claude go" over an answer and it stops mid-sentence
+  and takes down what you say next. It knows its own voice coming back off the windscreen from
+  yours, so it will not interrupt itself.
+- **"Claude stop" on its own means be quiet and drop it**—it shuts up and abandons whatever Claude
+  is working on.
+- **A rising note means it is taking this down, a falling note means it has gone.** You cannot look
+  at the phone, so it says so out loud.
+- Say **"start over"** inside the gate to forget the drive so far.
+
+The name gets misheard constantly—"cloud", "clod", "cold", "clawed"—so the phrases are matched by
+how they sound rather than how they are spelled, while the short word after the name is matched
+strictly, which is what keeps ordinary sentences from opening it by accident. Whether that gate
+behaves is the entire feel of the thing, so `npm run check` exercises it directly rather than
+leaving a car to find out.
+
+If you open the gate and then forget about it, it sends what it has after thirty seconds of silence
+rather than staying open all the way home. Tapping the big button while it is talking also shuts it
 up without ending the session.
 
 Because there is no longer a model in between to rewrite Claude's answer, Claude itself is told to
@@ -66,12 +80,20 @@ rules are in `server/spoken-answer-rules.md` and are sent once at the start of a
 
 ### What you give up
 
-Less than it first appeared. Interruption works. What is missing is the realtime model's sense of
-timing—it knew when you had finished a thought; here a pause is what ends your turn, so thinking out
-loud mid-sentence can send the question early.
+Saying two extra phrases per question. That is genuinely it: the realtime model's advantage was
+knowing when you had finished a thought, and saying so yourself turns out to be both cheaper and
+more reliable than a machine inferring it over road noise.
 
-A web page on an iPhone is also suspended when the screen locks, so this does not yet deliver "phone
-in pocket, screen off"—see issue #2. Real drives with the screen on come first anyway (#1).
+A web page on an iPhone is suspended when the screen locks, so this does not yet deliver "phone in
+pocket, screen off"—see issue #2. Real drives with the screen on come first anyway (#1).
+
+### Changing the phrases
+
+```bash
+VOICE_CLAUDE_OPEN="hey claude" VOICE_CLAUDE_CLOSE="that's it" npm start
+```
+
+Two or more words each. A single word opens by accident all day.
 
 ### Changing the voice
 

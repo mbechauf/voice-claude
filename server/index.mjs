@@ -11,8 +11,11 @@ import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
 import {
+  CLOSE_PHRASE,
   LISTENER,
   MODE,
+  OPEN_PHRASE,
+  OPEN_TIMEOUT_MS,
   PORT,
   PROJECT_DIR,
   SPEAKER,
@@ -129,6 +132,9 @@ async function handle(req, res) {
       speaker,
       speakerVoice: SPEAKER_VOICE,
       speakerRate: SPEAKER_RATE,
+      openPhrase: OPEN_PHRASE,
+      closePhrase: CLOSE_PHRASE,
+      openTimeout: OPEN_TIMEOUT_MS,
       project: path.basename(PROJECT_DIR),
     });
   }
