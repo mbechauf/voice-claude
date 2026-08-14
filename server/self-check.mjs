@@ -189,10 +189,14 @@ function checkPickingAProject(names) {
     return;
   }
 
+  const helpers = ["function howItSounds", "function nearlySame"]
+    .map((start) => page.match(new RegExp(`${start}[\\s\\S]*?\\n}`))[0])
+    .join("\n");
+
   const pick = new Function(
     "setup",
-    `${source[0].replace(/^  /gm, "")}; return projectAtTheFront;`,
-  )({ projectNames: names });
+    `${helpers}\n${source[0].replace(/^  /gm, "")}; return projectAtTheFront;`,
+  )(names);
 
   const shape = (said) => {
     const found = pick(said);
@@ -208,6 +212,10 @@ function checkPickingAProject(names) {
     ["the advisor app", "advisor", "the advisor app"],
     ["something that is not a project at all", "the login bug", "not a project"],
     ["a project named part-way through is not one", "some thing the voice app", "not a project"],
+    ["the name mangled by dictation", "the clot voice app", "the voice app"],
+    ["mangled, with the question stuck to it", "the clot voice app and file the issue", 'the voice app + "and file the issue"'],
+    ["just the giveaway word", "voice", "the voice app"],
+    ["a giveaway word buried later is only a word", "the thing that broke when i said advisor", "not a project"],
   ];
 
   for (const [name, said, expected] of cases) {
@@ -333,7 +341,7 @@ try {
 
   checkItKnowsItsOwnVoice();
   checkTheGate(setup.phrases);
-  checkPickingAProject(setup.projectNames);
+  checkPickingAProject({ projectNames: setup.projectNames, giveaways: setup.giveaways });
 } finally {
   server.kill("SIGTERM");
 }

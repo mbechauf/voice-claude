@@ -54,6 +54,38 @@ export const EVERY_PROJECT_NAME = Object.entries(PROJECTS)
   .flatMap(([name, { alsoCalled = [] }]) => [name, ...alsoCalled].map((said) => ({ said, name })))
   .sort((a, b) => b.said.split(" ").length - a.said.split(" ").length);
 
+// The word that gives each project away.
+//
+// Matching a whole spoken name is too brittle: "the clot voice app" is what came
+// back when the app's own name was said out loud, and no amount of listing names
+// catches that. But "voice" is in there, and "voice" belongs to exactly one project.
+// So the giveaway words are worked out here rather than listed — every word used in
+// any of a project's names, minus the ones that say nothing, minus any word that
+// more than one project could claim.
+const SAYS_NOTHING = new Set([
+  "the", "my", "a", "an", "app", "apps", "application", "project", "code", "thing", "llm",
+]);
+
+const wordsUsedBy = Object.fromEntries(
+  Object.entries(PROJECTS).map(([name, { alsoCalled = [] }]) => [
+    name,
+    new Set(
+      [name, ...alsoCalled]
+        .flatMap((said) => said.toLowerCase().split(/\s+/))
+        .filter((word) => word && !SAYS_NOTHING.has(word)),
+    ),
+  ]),
+);
+
+export const GIVEAWAY_WORDS = Object.fromEntries(
+  Object.entries(wordsUsedBy).map(([name, words]) => [
+    name,
+    [...words].filter((word) =>
+      Object.entries(wordsUsedBy).every(([other, theirs]) => other === name || !theirs.has(word)),
+    ),
+  ]),
+);
+
 // Where a drive starts, before you have said otherwise.
 export const STARTING_PROJECT = process.env.VOICE_CLAUDE_PROJECT ?? PROJECTS["the advisor app"].at;
 
@@ -139,7 +171,13 @@ export const PHRASES = {
 
   // Change what you are working on: "work on the voice app". The words after it are
   // the project, matched against the list above.
-  project: ["work on", "switch to", "let's work on"],
+  project: [
+    "work on", "let's work on", "lets work on", "working on",
+    "switch to", "switch over to", "switch over", "switch project to",
+    // "go to" is deliberately absent: two-letter words are too easy to mishear into,
+    // and it read "does it send it to the server" as an instruction.
+    "change to", "move to", "over to the",
+  ],
 
   // Which one are we on? Answered by the phone, never by Claude.
   where: ["what project", "which project", "where are we"],

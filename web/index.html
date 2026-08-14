@@ -490,10 +490,15 @@ function nearlySame(heard, wanted, leniently = false) {
     return heard[0] === wanted[0] && heard.length <= wanted.length + 4;
   }
 
-  // Two slips is too many for the first word of a phrase: it let "with this" be
-  // read as "switch to" in the middle of an ordinary sentence. The first word is
-  // the anchor, so it gets one slip and the sound test above; the rest, which only
-  // matter once the anchor has landed, keep the benefit of the doubt.
+  // A two-letter anchor has nothing to spare: one slip turns "go" into "to", "so",
+  // "no" and "do", which read "does it send it to the server" as a command. Words
+  // that short have to be exactly right unless they come after the anchor.
+  if (!leniently && wanted.length <= 2) return false;
+
+  // Two slips is too many for the first word of a phrase either: it let "with this"
+  // be read as "switch to" mid-sentence. The anchor gets one slip and the sound test
+  // above; the rest, which only matter once the anchor has landed, keep the benefit
+  // of the doubt.
   const allowed = wanted.length <= 5 || !leniently ? 1 : 2;
   if (Math.abs(heard.length - wanted.length) > allowed) return false;
 
@@ -1081,6 +1086,35 @@ function splitFrontEnd() {
         return { project: realName, rest: said.slice(said.length - (spoken.length - wanted.length)).trim() };
       }
     }
+
+    // No name landed whole. Dictation mangles them — the app's own name came back as
+    // "the clot voice app" — so fall back to the word that gives a project away.
+    //
+    // It has to be at the very front, with nothing but filler before it. A giveaway
+    // word further into a sentence is just a word, and mistaking one for a name would
+    // turn an ordinary question into a switch.
+    const FILLER = new Set(["the", "my", "a", "an", "to", "on", "over", "onto", "into"]);
+    const PART_OF_A_NAME = new Set(["app", "apps", "application", "project", "code", "one", "thing"]);
+    const words = spoken.split(/\s+/);
+
+    let at = 0;
+    while (at < words.length && FILLER.has(words[at])) at += 1;
+    if (at >= words.length) return null;
+
+    for (const [project, giveaways] of Object.entries(setup.giveaways ?? {})) {
+      const gives = (word) => giveaways.some((giveaway) => nearlySame(word, giveaway));
+      if (!gives(words[at])) continue;
+
+      // The name may run on — "clot voice app" is three words for one project — so
+      // everything that is still plainly part of the name is swallowed with it, and
+      // what is left is the question.
+      let after = at + 1;
+      while (after < words.length && (gives(words[after]) || PART_OF_A_NAME.has(words[after]))) {
+        after += 1;
+      }
+      return { project, rest: words.slice(after).join(" ") };
+    }
+
     return null;
   }
 
@@ -1288,9 +1322,11 @@ function splitFrontEnd() {
       goBtn.disabled = false;
       show();
       idleState();
+      const firstWording = (name) => [setup.phrases?.[name]].flat()[0];
       log(
-        `ready — talk. Say "${setup.phrases.send}" to send, ` +
-        `"${setup.phrases.read}" to hear it back, "${setup.phrases.wipe}" to start again.`,
+        `ready — talk. Say "${firstWording("send")}" to send, ` +
+        `"${firstWording("read")}" to hear it back, ` +
+        `"${firstWording("wipe")}" to start again.`,
         "work",
       );
       trace("session started");

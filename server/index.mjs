@@ -22,6 +22,7 @@ import {
   READ_OUT_PAGE,
   PORT,
   EVERY_PROJECT_NAME,
+  GIVEAWAY_WORDS,
   PROJECTS,
   STARTING_PROJECT,
   SPEAKER,
@@ -202,6 +203,9 @@ async function handle(req, res) {
       // Every name each answers to, longest first, so the phone can pick a project
       // out of the front of a sentence and leave the rest as the question.
       projectNames: EVERY_PROJECT_NAME,
+      // The word that gives each project away, for when the spoken name comes back
+      // mangled — "the clot voice app" is still plainly the voice one.
+      giveaways: GIVEAWAY_WORDS,
     });
   }
 
@@ -278,9 +282,13 @@ async function handle(req, res) {
     const wanted = String(name ?? "").toLowerCase().trim().replace(/^(the|my)\s+/, "");
 
     // Longest name first, so "the voice claude app" is not read as "the voice".
-    const match = EVERY_PROJECT_NAME.find(
-      ({ said }) => said.replace(/^(the|my)\s+/, "") === wanted,
-    )?.name;
+    const match =
+      EVERY_PROJECT_NAME.find(({ said }) => said.replace(/^(the|my)\s+/, "") === wanted)?.name ??
+      // Failing that, the giveaway word: whatever dictation did to the rest of it,
+      // "voice" belongs to exactly one project.
+      Object.entries(GIVEAWAY_WORDS).find(([, words]) =>
+        words.some((word) => wanted.split(/\s+/).includes(word)),
+      )?.[0];
 
     if (!match) {
       return send(res, 404, { error: `I don't know ${name}`, projects: known });
