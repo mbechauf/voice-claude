@@ -362,13 +362,7 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
 // phone does no talking at all; it just plays what arrives. The next sentence is
 // fetched while the current one plays, so the pause is only ever before the first.
 
-const SILENCE =
-  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=";
-
 function macMouth({ fallback, onStart, onFinish, onTrouble }) {
-  const player = new Audio();
-  player.preload = "auto";
-
   let speaking = false;
   let abandoned = false;
   const spoken = recentlySpoken();
@@ -380,17 +374,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
       body: JSON.stringify({ text: sentence }),
     });
     if (!response.ok) throw new Error(`the Mac couldn't say that (${response.status})`);
-    return URL.createObjectURL(await response.blob());
-  }
-
-  function play(url) {
-    return new Promise((resolve) => {
-      const done = () => { URL.revokeObjectURL(url); resolve(); };
-      player.onended = done;
-      player.onerror = done; // a dud sentence must not strand the rest of the answer
-      player.src = url;
-      player.play().catch(done);
-    });
+    return response.arrayBuffer();
   }
 
   async function read(parts) {
@@ -400,6 +384,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
       await pending;
     } catch (err) {
       // The good voice is unreachable. Better a rough voice than silence in a car.
+      trace("voice unreachable", err.message ?? err);
       onTrouble?.(String(err.message ?? err));
       speaking = false;
       fallback?.speak(parts.join(" "));
@@ -407,19 +392,30 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
     }
 
     for (let i = 0; i < parts.length; i += 1) {
-      let sound;
+      let bytes;
       try {
-        sound = await pending;
+        bytes = await pending;
       } catch (err) {
         onTrouble?.(String(err.message ?? err));
         break;
       }
-      if (abandoned) { URL.revokeObjectURL(sound); break; }
+      if (abandoned || !bytes) break;
 
       // Start making the next one while this one is being heard.
       pending = i + 1 < parts.length ? fetchSound(parts[i + 1]).catch(() => null) : null;
       spoken.add(parts[i]);
-      await play(sound);
+      try {
+        trace("speaking", parts[i].slice(0, 60));
+        await sound.say(bytes);
+      } catch (err) {
+        // The channel refused it. Say it some other way rather than appearing to
+        // talk while making no sound, which is the worst of both.
+        trace("could not play", err.message ?? err);
+        onTrouble?.("The phone wouldn't play that, so its own voice is reading it.");
+        speaking = false;
+        fallback?.speak(parts.slice(i).join(" "));
+        return;
+      }
       if (abandoned) break;
     }
 
@@ -428,11 +424,8 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
   }
 
   return {
-    // iPhones stay silent unless the first sound was asked for by a tap, so a moment
-    // of nothing is played from the Start button and the rest of the drive is free.
     unlock() {
-      player.src = SILENCE;
-      player.play().catch(() => {});
+      sound.wake();
       fallback?.unlock();
     },
     speak(text) {
@@ -445,8 +438,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
     },
     silence() {
       abandoned = true;
-      try { player.pause(); } catch {}
-      player.removeAttribute("src");
+      sound.hush();
       fallback?.silence();
       if (speaking) { speaking = false; onFinish?.(); }
     },
@@ -454,6 +446,7 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
     get saying() { return [spoken.text, fallback?.saying ?? ""].join(" ").trim(); },
   };
 }
+
 
 // ----------------------------------------------------------------------- the gate
 //
@@ -602,35 +595,79 @@ function readAsInstructions(text, phrases) {
   return steps;
 }
 
-// ------------------------------------------------------------------ small noises
+// ------------------------------------------------------------------------ sound
 //
-// You cannot look at the phone to see whether it is taking this down, so the gate
-// says so out loud. Two short notes, rising to open and falling to close: quicker
-// than a spoken "yes?" and impossible to mistake for part of an answer.
+// Every sound the page makes goes through here, and the reason is the iPhone: a page
+// may only make sound through a channel opened by a real tap. Opening one lazily,
+// the first time something wants to be heard, gets it silently refused — and a phone
+// that thinks it is talking while making no sound is impossible to diagnose from the
+// driver's seat. So exactly one channel is opened by the Start button, and both the
+// notes and the voice go down it.
 
-let tones = null;
+const sound = {
+  channel: null,
+  playing: null,
 
-function beep(which) {
-  try {
-    tones ??= new (window.AudioContext ?? window.webkitAudioContext)();
-    if (tones.state === "suspended") tones.resume();
-    const [from, to] = which === "open" ? [520, 780] : [700, 440];
-    const tone = tones.createOscillator();
-    const level = tones.createGain();
-    tone.type = "sine";
-    tone.frequency.setValueAtTime(from, tones.currentTime);
-    tone.frequency.exponentialRampToValueAtTime(to, tones.currentTime + 0.12);
-    // Fade in and out, or it clicks, and a click in a headset while driving startles.
-    level.gain.setValueAtTime(0.0001, tones.currentTime);
-    level.gain.exponentialRampToValueAtTime(0.25, tones.currentTime + 0.02);
-    level.gain.exponentialRampToValueAtTime(0.0001, tones.currentTime + 0.16);
-    tone.connect(level).connect(tones.destination);
-    tone.start();
-    tone.stop(tones.currentTime + 0.18);
-  } catch {
-    // A missing beep is a small loss; it must never stop the conversation.
-  }
-}
+  // Called from the tap itself, never later.
+  wake() {
+    try {
+      this.channel ??= new (window.AudioContext ?? window.webkitAudioContext)();
+      if (this.channel.state === "suspended") this.channel.resume();
+      trace("sound channel", this.channel.state);
+    } catch (err) {
+      trace("sound channel refused", err.message ?? err);
+    }
+  },
+
+  get awake() { return this.channel?.state === "running"; },
+
+  // Two short notes: rising when something was thrown away, falling when a question
+  // has gone. Quicker than a spoken "yes?" and never mistaken for part of an answer.
+  beep(which) {
+    if (!this.channel) return;
+    try {
+      const now = this.channel.currentTime;
+      const [from, to] = which === "open" ? [520, 780] : [700, 440];
+      const tone = this.channel.createOscillator();
+      const level = this.channel.createGain();
+      tone.type = "sine";
+      tone.frequency.setValueAtTime(from, now);
+      tone.frequency.exponentialRampToValueAtTime(to, now + 0.12);
+      // Fade in and out, or it clicks, and a click in a headset while driving startles.
+      level.gain.setValueAtTime(0.0001, now);
+      level.gain.exponentialRampToValueAtTime(0.25, now + 0.02);
+      level.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+      tone.connect(level).connect(this.channel.destination);
+      tone.start();
+      tone.stop(now + 0.18);
+    } catch {
+      // A missing note is a small loss; it must never stop the conversation.
+    }
+  },
+
+  /** Play a piece of speech. Resolves when it has finished, or been cut off. */
+  async say(bytes) {
+    if (!this.channel) throw new Error("no sound channel — press start first");
+    if (this.channel.state === "suspended") await this.channel.resume();
+
+    const audio = await this.channel.decodeAudioData(bytes);
+    return new Promise((resolve) => {
+      const source = this.channel.createBufferSource();
+      source.buffer = audio;
+      source.connect(this.channel.destination);
+      source.onended = () => { this.playing = null; resolve(); };
+      this.playing = source;
+      source.start();
+    });
+  },
+
+  hush() {
+    try { this.playing?.stop(); } catch {}
+    this.playing = null;
+  },
+};
+
+const beep = (which) => sound.beep(which);
 
 // ------------------------------------------------------------- the free front end
 
@@ -741,14 +778,35 @@ function splitFrontEnd() {
     if (command === "send") return send();
     if (command === "wipe") return wipe();
     if (command === "read") return readBack();
+    if (command === "undo") return dropLast();
   }
 
   // Says back what it has so far. Its own voice is filtered out of what it hears,
   // so reading the question aloud cannot end up recorded as part of the question.
   function readBack() {
     const soFar = question.join(" ").trim();
+    trace("READING BACK", soFar || "(nothing)");
+    log(soFar ? `reading back: ${soFar}` : "nothing recorded yet", "work");
     mouth?.silence();
-    mouth?.speak(soFar ? `You have: ${soFar}` : "Nothing recorded yet.");
+    mouth?.speak(soFar ? `So far you have. ${soFar}` : "Nothing recorded yet.");
+  }
+
+  // The last thing you said, taken out. Dictation hands over a piece each time you
+  // pause, so a piece is roughly a sentence — which is what you would want back.
+  function dropLast() {
+    if (!question.length) {
+      mouth?.silence();
+      mouth?.speak("There is nothing to take back.");
+      return;
+    }
+    const dropped = question.pop();
+    trace("TOOK BACK", dropped);
+    log(`took back: ${dropped}`, "work");
+    show();
+    mouth?.silence();
+    beep("open");
+    const left = question.join(" ").trim();
+    mouth?.speak(left ? `Taken out. It now ends. ${question[question.length - 1]}` : "Taken out. Nothing left.");
   }
 
   function heard(text) {

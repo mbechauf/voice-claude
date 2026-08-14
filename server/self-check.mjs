@@ -112,7 +112,7 @@ function checkTheGate() {
 
   // The phrases actually in use. A phrase is only worth having if it survives being
   // said normally, arrives in pieces, and never fires inside an ordinary question.
-  const REAL = { send: "all done", wipe: "scratch that", read: "read prompt" };
+  const REAL = { send: "all done", wipe: "scratch that", read: "read prompt", undo: "take that back" };
   const withRealPhrases = (chunks) => overPieces(chunks, REAL);
 
   const real = [
@@ -127,6 +127,10 @@ function checkTheGate() {
     ["hearing it back in pieces", ["read", "prompt"], "READ"],
     ["a question about reading is not the command", ["can it read the prompt file"], "can it read the prompt file"],
     ["asking it to read something else", ["read the tests"], "read the tests"],
+    ["taking back the last thing said", ["and check the tests", "take that back"], "and check the tests | UNDO"],
+    ["taking it back in pieces", ["take that", "back"], "UNDO"],
+    ["a question about taking things back is not the command", ["can you roll that back for me"], "can you roll that back for me"],
+    ["a question mentioning back", ["put the old version back"], "put the old version back"],
   ];
 
   for (const [name, chunks, expected] of real) {

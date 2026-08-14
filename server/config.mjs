@@ -65,8 +65,9 @@ export const GATE = process.env.VOICE_CLAUDE_GATE ?? "phrases";
 // transcribed as itself.
 export const PHRASES = {
   send: process.env.VOICE_CLAUDE_CLOSE ?? "all done",       // that is the question — go
-  wipe: process.env.VOICE_CLAUDE_OPEN ?? "scratch that",    // throw it away, start again
+  wipe: process.env.VOICE_CLAUDE_OPEN ?? "scratch that",    // throw it all away, start again
   read: process.env.VOICE_CLAUDE_READ ?? "read prompt",     // say back what you have so far
+  undo: process.env.VOICE_CLAUDE_UNDO ?? "take that back",  // drop the last thing said
 };
 
 // Only used when there is no gate. How long a silence means you have finished.

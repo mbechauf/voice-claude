@@ -49,8 +49,9 @@ Then talk. Everything you say builds up in one box on the screen, in full, and s
 things you can say are instructions rather than part of the question:
 
 - **"all done"** — that is the question, send it
-- **"read prompt"** — say back what has been recorded so far, for when you cannot look
-- **"scratch that"** — throw it away and start the question again
+- **"read prompt"** — read back what has been recorded so far, for when you cannot look
+- **"take that back"** — drop the last thing you said and keep the rest
+- **"scratch that"** — throw it all away and start the question again
 
 Nothing else does anything. There is no clock: a pause is a person thinking, not a person finished,
 so no length of silence ever sends a question or throws one away. That was the whole failure of the
@@ -97,13 +98,18 @@ pocket, screen off"—see issue #2. Real drives with the screen on come first an
 ### Changing the phrases
 
 ```bash
-VOICE_CLAUDE_CLOSE="over to you" VOICE_CLAUDE_OPEN="wipe that" VOICE_CLAUDE_READ="say it back" npm start
+VOICE_CLAUDE_CLOSE="over to you" VOICE_CLAUDE_READ="say it back" npm start
 ```
 
 Two or more words each, made of words dictation meets every day. A single word fires by accident all
 day long, and a rare or invented word never gets transcribed as itself. There is nothing special
-about there being three of them—they are a list in `server/config.mjs`, and adding another is a line
-there and a line in the page.
+about how many there are—they are a list in `server/config.mjs`, and adding another is a line there
+and a line in the page.
+
+Every sound the page makes—the notes and the voice—goes down a single channel opened by the Start
+button, because an iPhone only lets a page make sound through one that a real tap opened. Opening it
+lazily, the first time something wants to be heard, gets it silently refused, and a phone that
+believes it is talking while making no sound is impossible to diagnose from the driver's seat.
 
 ### Changing the voice
 
