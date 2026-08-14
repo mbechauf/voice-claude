@@ -2,7 +2,7 @@
 // goes, so the voice has something honest to say during the long pauses.
 
 import { spawn } from "node:child_process";
-import { ALLOWED_TOOLS, PROJECT_DIR, WORK_TIMEOUT_MS } from "./config.mjs";
+import { ALLOWED_TOOLS, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
 
 // Turns a tool name into something sayable. Deliberately vague about paths —
 // nobody driving wants to hear a directory listing.
@@ -61,7 +61,7 @@ export function stopWork() {
  * written report. It only goes out on the first request of a conversation, because
  * every later one continues that same conversation and Claude still has it.
  */
-export function startWork(request, emit, { briefing = "" } = {}) {
+export function startWork(request, emit, { briefing = "", project = STARTING_PROJECT } = {}) {
   if (current) stopWork();
 
   const opening = briefing && !conversationId ? `${briefing}\n\n---\n\n${request}` : request;
@@ -88,8 +88,10 @@ export function startWork(request, emit, { briefing = "" } = {}) {
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
 
+  // The folder it runs in is the project you said you were working on. Everything
+  // follows from that: which files it sees, and which repository an issue lands on.
   const child = spawn("claude", args, {
-    cwd: PROJECT_DIR,
+    cwd: project,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });

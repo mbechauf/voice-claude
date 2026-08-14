@@ -45,7 +45,7 @@ back to the phone's own rather than leaving you with silence in a car.
 Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
 so Safari warns the first time; accept it and it stays accepted.
 
-Then talk. Everything you say builds up in one box on the screen, in full, and stays there. Three
+Then talk. Everything you say builds up in one box on the screen, in full, and stays there. Six
 things you can say are instructions rather than part of the question:
 
 - **"all done"** — that is the question, send it. Also "that's it", "over to you", "off you go".
@@ -54,11 +54,24 @@ things you can say are instructions rather than part of the question:
 - **"take that back"** — drop the last thing you said, keep the rest. Also "delete last".
 - **"scratch that"** — throw the whole question away and start it again. Also "start again".
 - **"fresh start"** — forget the whole drive, not just this question.
+- **"work on the voice app"** — change what you are working on. Also "switch to". Everything after
+  it happens there: what gets read, what gets changed, and which repository an issue is filed
+  against. Ask **"what project"** to hear where you are.
+- **"what can i say"** — the phone reads this list back to you. Also "help me out", "say the
+  commands". Answered by the phone itself, never sent to Claude: the moment you cannot remember a
+  command is the worst moment to wait a minute, and asking Claude would mean saying the send phrase,
+  which is one of the things you have just forgotten.
 
 Several wordings each, because you will not remember one exact phrase while driving and dictation
 mishears. The cost of a wording is that it can no longer appear inside a question, so they are kept
 to things nobody says while describing code—"read the prompt" is deliberately not one of them,
 because "can it read the prompt file" is a real question.
+
+**Nothing long is read out in one go.** A list said straight through is lost by the third item, so
+it reads a couple and asks whether you want the rest. While it is waiting on a question of its own,
+a bare **"yes"** or **"no"** is enough—no send phrase. Single words are safe here and nowhere else:
+they are deaf until it has asked you something, and go deaf again the instant you say anything at
+all, an answer or not. Anything other than yes or no is treated as speech, exactly as before.
 
 You also hear where things are without looking: two rising blips when a question has gone, a quiet
 low note every fifteen seconds while Claude is still working, and a falling note when an answer is
@@ -142,11 +155,26 @@ change nothing else in the system.
 
 ### Which project it talks about
 
+Say **"work on the voice app"**, or whichever of them you mean. The projects and the names you say
+out loud are a list in `server/config.mjs`; add as many as you like. A drive starts on the advisor
+app unless you say otherwise:
+
 ```bash
 export VOICE_CLAUDE_PROJECT=/absolute/path/to/project
 ```
 
-Defaults to `~/Code/Advisor-LLM`.
+This is the setting everything else hangs off, which is why it is spoken and repeated back. The
+folder decides which files are changed, what Claude can see, and—easy to miss—which repository an
+issue gets filed against, so the wrong project quietly files your ideas onto somebody else's list.
+
+Changing it forgets the conversation so far, deliberately: Claude's memory is of the other project,
+and carrying that across would have it answering about the wrong code with complete confidence.
+Claude is also told, each time, that the chosen project is the whole world for that conversation and
+that it should stop and say so rather than reach into a neighbouring one.
+
+"work on" is a thing people say inside ordinary questions—"can you work on the login bug"—so it only
+counts as changing project if what follows actually names one of yours. If it does not, both halves
+go back into the question exactly as spoken.
 
 ### Checking it still works
 

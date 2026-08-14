@@ -5,9 +5,30 @@ import path from "node:path";
 
 export const PORT = Number(process.env.VOICE_CLAUDE_PORT ?? 8787);
 
-// The project Claude works on when you talk to it.
-export const PROJECT_DIR =
-  process.env.VOICE_CLAUDE_PROJECT ?? path.join(homedir(), "Code", "Advisor-LLM");
+// ---------------------------------------------------------------- the projects
+//
+// What you are working on right now, said out loud: "work on the voice app".
+//
+// This is the one setting everything else hangs off. The folder decides which
+// repository an issue is filed against, which files get changed, and what Claude is
+// looking at — so a project chosen by mistake files your ideas onto somebody else's
+// list and edits the wrong code, quietly, while you are watching the road. Saying it
+// out loud and hearing it repeated back is the whole point.
+//
+// The spoken name is what you would actually call it in conversation, not the name
+// of the folder. Add as many as you like.
+const CODE = path.join(homedir(), "Code");
+
+export const PROJECTS = {
+  "the advisor app": path.join(CODE, "Advisor-LLM"),
+  "the voice app": path.join(CODE, "voice-claude"),
+  "the resume builder": path.join(CODE, "resume_builder"),
+  "the financial overview": path.join(CODE, "financial-overview"),
+  "aws admin": path.join(CODE, "aws-admin"),
+};
+
+// Where a drive starts, before you have said otherwise.
+export const STARTING_PROJECT = process.env.VOICE_CLAUDE_PROJECT ?? PROJECTS["the advisor app"];
 
 // ------------------------------------------------------------ the voice layer
 //
@@ -88,7 +109,66 @@ export const PHRASES = {
 
   // Forget the whole drive, not just this question.
   forget: ["fresh start", "forget everything"],
+
+  // Change what you are working on: "work on the voice app". The words after it are
+  // the project, matched against the list above.
+  project: ["work on", "switch to", "let's work on"],
+
+  // Which one are we on? Answered by the phone, never by Claude.
+  where: ["what project", "which project", "where are we"],
+
+  // Say what all of these are. Answered by the phone itself, out of the list below —
+  // it never goes to Claude, because the one moment you cannot remember a command is
+  // the worst moment to wait a minute for an answer.
+  help: ["what can i say", "help me out", "say the commands"],
 };
+
+// What each one does, in the words it should be said aloud in.
+//
+// It lives beside the wordings rather than in the page for one reason: a command and
+// its description go stale separately if they live apart, and a help list that lies
+// is worse than none. The page builds what it says from PHRASES, so a command added
+// above turns up in the spoken list whether or not it is described here — a missing
+// description costs you the sentence, never the command.
+export const WHAT_EACH_DOES = {
+  send: "send what you have said so far",
+  read: "hear back what you have said so far",
+  undo: "drop just the last thing you said",
+  wipe: "throw the whole question away and start it again",
+  forget: "forget the whole drive, not just this question",
+  help: "this list",
+  project: "change what we are working on — say work on, then the project",
+  where: "say which project we are on",
+};
+
+// ------------------------------------------------- answering a question it asked
+//
+// Everything above is two or more words, because a single everyday word fires by
+// accident all day. These are single words, and that is safe for one reason only:
+// they are not listened for. They only mean anything in the seconds after the phone
+// itself has asked you something, and the window shuts the instant you say anything
+// at all — an answer, or a sentence that is plainly not one. Outside that window
+// "yes" is just a word in a question, exactly as it was before.
+//
+// Why it exists: without it, answering "more?" means saying yes AND then the send
+// phrase, which is two things to remember for a one-word answer, at the moment your
+// attention is on the road.
+//
+// Whole utterance only. "yes" is an answer; "yes and check the tests" is not, and
+// falls through into the question the way it always would.
+export const ANSWERS = {
+  yes: ["yes", "yeah", "yep", "sure", "ok", "okay", "go on", "more", "next", "carry on"],
+  no: ["no", "nope", "stop", "enough", "that's enough", "no thanks", "that'll do"],
+};
+
+// How long the phone waits for that one-word answer before deciding you have moved
+// on. Long enough to think at a junction, short enough that a stray "yes" minutes
+// later is just a word again.
+export const ANSWER_WINDOW_MS = Number(process.env.VOICE_CLAUDE_ANSWER_WINDOW ?? 25_000);
+
+// How many things it reads out before stopping to ask whether you want the rest.
+// Two is about what survives being heard once, at speed, with traffic.
+export const READ_OUT_PAGE = Number(process.env.VOICE_CLAUDE_PAGE ?? 2);
 
 // Only used when there is no gate. How long a silence means you have finished.
 export const PAUSE_MS = Number(process.env.VOICE_CLAUDE_PAUSE ?? 3_500);
@@ -124,6 +204,18 @@ export const ALLOWED_TOOLS = [
   "Bash(git log:*)",
   "Bash(git show:*)",
   "Bash(ls:*)",
+
+  // Issues, added 2026-08-14 while driving, asked for out loud. The working rule is
+  // that the issue list is the record and a note in a file is not — so a piece of
+  // work thought up on the road has to be able to reach the list from the road,
+  // otherwise it lives in a file nobody opens. Reading them matters as much as
+  // writing them: without the list it cannot tell what is already known.
+  //
+  // Filing and reading only. Closing an issue is deliberately absent — deciding
+  // something is finished is not a thing to do while you are looking at the road.
+  "Bash(gh issue create:*)",
+  "Bash(gh issue list:*)",
+  "Bash(gh issue view:*)",
 ];
 
 // How long to let a single piece of work run before giving up on it.

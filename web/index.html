@@ -490,7 +490,11 @@ function nearlySame(heard, wanted, leniently = false) {
     return heard[0] === wanted[0] && heard.length <= wanted.length + 4;
   }
 
-  const allowed = wanted.length <= 5 ? 1 : 2;
+  // Two slips is too many for the first word of a phrase: it let "with this" be
+  // read as "switch to" in the middle of an ordinary sentence. The first word is
+  // the anchor, so it gets one slip and the sound test above; the rest, which only
+  // matter once the anchor has landed, keep the benefit of the doubt.
+  const allowed = wanted.length <= 5 || !leniently ? 1 : 2;
   if (Math.abs(heard.length - wanted.length) > allowed) return false;
 
   // How many single-letter changes turn one into the other.
@@ -567,7 +571,9 @@ function makePhraseReader(phrases) {
         const said = commands.find((c) => phraseStartsAt(pending, i, c.words));
         if (said) {
           flush();
-          steps.push({ command: said.name });
+          // It reports the words it swallowed, so a command that turns out not to
+          // have been one can be put back into the question exactly as spoken.
+          steps.push({ command: said.name, spokenAs: pending.slice(i, i + said.words.length).join(" ") });
           i += said.words.length;
           continue;
         }
@@ -740,6 +746,7 @@ const sound = {
       ready: [[880, 660]],              // an answer is about to be read
       working: [[300, 300]],            // still going, quietly
       wiped: [[700, 380]],              // that has been thrown away
+      listening: [[660, 880]],          // your turn: a bare yes or no lands now
     };
     const shape = shapes[which];
     if (!shape || !this.notes) return;
@@ -883,13 +890,218 @@ function splitFrontEnd() {
 
   // Everything you can say that is an instruction rather than part of the question.
   // Adding one is a line here and a line in the settings on the Mac.
-  function obey(command) {
+  function obey(command, spokenAs = "") {
     trace("COMMAND", command);
     if (command === "send") return send();
     if (command === "wipe") return wipe();
     if (command === "read") return readBack();
     if (command === "undo") return dropLast();
     if (command === "forget") return forgetTheDrive();
+    if (command === "where") return sayWhere();
+    if (command === "project") { awaitingProject = spokenAs; return; }
+    if (command === "help") return sayWhatYouCanSay();
+  }
+
+  // --------------------------------------------- questions the phone itself asks
+  //
+  // Anything long is worse read out in one go than not read out at all: by the third
+  // item you have lost the first, and you are driving. So nothing here says more than
+  // a couple of things before stopping to ask whether you want the rest.
+  //
+  // The awkward part was answering. Every other way of talking to this needs a send
+  // phrase on the end, which for the word "yes" is more to remember than the answer
+  // itself. So while it is waiting on a question it asked, a bare yes or no counts on
+  // its own. The window is narrow and it shuts on the first thing you say, whatever
+  // that is — so ordinary speech is never sitting inside it.
+  let waitingOn = null;      // { onYes, onNo } while a question of its own is open
+  let waitTimer = null;
+  let turnTimer = null;
+
+  function stopWaiting() {
+    if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+    waitingOn = null;
+  }
+
+  // Whether a bare yes will land is invisible from the driver's seat, and getting it
+  // wrong is expensive: you say "yes", nothing happens, and the word quietly becomes
+  // part of your next question instead. So the window announces itself. It is not
+  // sounded when it opens but when it becomes usable — the moment the talking stops —
+  // because a note played underneath its own voice is one more thing to talk over.
+  function blipWhenItIsYourTurn() {
+    if (turnTimer) clearTimeout(turnTimer);
+    const check = () => {
+      turnTimer = null;
+      if (!waitingOn) return;                                   // answered, or given up on
+      if (mouth?.busy) { turnTimer = setTimeout(check, 250); return; }
+      sound.note("listening");
+    };
+    turnTimer = setTimeout(check, 250);
+  }
+
+  function waitForAnswer(onYes, onNo) {
+    waitingOn = { onYes, onNo };
+    if (waitTimer) clearTimeout(waitTimer);
+    blipWhenItIsYourTurn();
+    const window = setup.answerWindow ?? 25_000;
+    const closeUnlessStillTalking = () => {
+      // A long answer can take longer to read than the window lasts, and it would be
+      // absurd to stop waiting for a reply before finishing the question. The clock
+      // is really on your thinking time, so it does not start until it stops talking.
+      if (mouth?.busy) { waitTimer = setTimeout(closeUnlessStillTalking, 2_000); return; }
+      trace("stopped waiting", "no answer");
+      stopWaiting();
+    };
+    waitTimer = setTimeout(closeUnlessStillTalking, window);
+  }
+
+  function askYesNo(spoken, onYes, onNo) {
+    mouth?.speak(spoken);
+    waitForAnswer(onYes, onNo);
+  }
+
+  // Claude asks things too — "want the next one?" — and answering those was the whole
+  // complaint: saying "yes" and then the send phrase is more to remember than the
+  // answer. So the same window opens when an answer it has just read ENDS in a
+  // question.
+  //
+  // Read off the answer itself rather than set by Claude deliberately. Claude marking
+  // its own questions would work right up until it forgot, and a shortcut that works
+  // most of the time is worse than one that works for a reason. A question mark is
+  // there or it is not.
+  //
+  // Being wrong here costs nothing either way. A question it misses just needs the
+  // send phrase, the way everything does today. A question it imagines opens a window
+  // that shuts again the moment you say anything that is not yes or no — and those
+  // words go into your question untouched, exactly as they would have.
+  const endsWithAQuestion = (text) => /\?\s*$/.test(String(text ?? "").trim());
+
+  // A bare yes or no is the whole answer: it goes off on its own, no send phrase. It
+  // joins anything already dictated rather than replacing it, so a yes said after a
+  // half-built question adds to it instead of quietly throwing it away.
+  function answerClaude(word) {
+    question.push(word);
+    show();
+    send();
+  }
+
+  // Whole utterance only. "yes" is an answer; "yes and check the tests" is a
+  // sentence, and goes where sentences go. Either way the waiting is over.
+  function answerGiven(text) {
+    if (!waitingOn) return false;
+    const said = plainWords(text).join(" ");
+    if (!said) return false;
+    const matches = (wordings) =>
+      [wordings].flat().some((wording) => plainWords(wording).join(" ") === said);
+
+    const { onYes, onNo } = waitingOn;
+    stopWaiting();
+    if (matches(setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
+    if (matches(setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
+    trace("stopped waiting", `said something else: ${said}`);
+    return false;   // not an answer — carry on and treat it as speech
+  }
+
+  // Read a list out a couple at a time, asking between each lot. Written for the
+  // command list but deliberately knows nothing about commands, because everything
+  // this thing reads aloud has the same problem.
+  function readOutInTurn(items, { intro = "", done = "That's all of them." } = {}) {
+    const size = Math.max(1, setup.readOutPage ?? 2);
+    let at = 0;
+    const more = () => {
+      // The intro rides on the first lot rather than being said separately: two
+      // sentences spoken as two goes means the second one cuts the first one off.
+      const lot = [at === 0 ? intro : "", ...items.slice(at, at + size)].filter(Boolean);
+      at += Math.min(size, items.length - at);
+      const left = items.length - at;
+      const spoken = lot.join(" ");
+      log(spoken, "work");
+      if (left > 0) askYesNo(`${spoken} That's ${left} more. Want them?`, more, () => mouth?.speak("Right you are."));
+      else mouth?.speak(`${spoken} ${done}`);
+    };
+    return more;
+  }
+
+  // What you can say, said out loud. Answered here rather than by Claude, because
+  // the moment you cannot remember a command is the worst moment to wait a minute
+  // for an answer — and because asking Claude means first saying the send phrase,
+  // which is one of the things you have just forgotten.
+  //
+  // Built from the commands themselves, so one added in the settings on the Mac
+  // turns up here without this function being touched. A command with no
+  // description still gets read out, with its wordings and no explanation: a help
+  // list that quietly omits a command is the failure worth designing against.
+  function sayWhatYouCanSay() {
+    const says = (wordings) => {
+      const all = [wordings].flat();
+      if (all.length === 1) return `say "${all[0]}"`;
+      return `say "${all.slice(0, -1).join('", "')}", or "${all[all.length - 1]}"`;
+    };
+    const described = Object.entries(setup.phrases ?? {}).map(([name, wordings]) => {
+      const does = (setup.whatEachDoes ?? {})[name];
+      return does ? `To ${does}, ${says(wordings)}.` : `And ${says(wordings)}.`;
+    });
+    trace("HELP", `${described.length} commands`);
+    mouth?.silence();
+    readOutInTurn(described, { intro: `There are ${described.length}.` })();
+  }
+
+  // "work on the voice app" — the words after the phrase name the project, so the
+  // next thing said is taken as the name rather than added to the question.
+  // The words of the phrase just said, while we wait to see whether a project name
+  // follows. Null when we are not waiting.
+  let awaitingProject = null;
+
+  // Loosely, because it is spoken: "the voice app", "voice app" and "voice" are all
+  // the same thing, and dictation will drop a "the" without warning.
+  function knownProject(said) {
+    const bare = (text) => text.toLowerCase().replace(/^(the|my)\s+/, "").trim();
+    const wanted = bare(said);
+    if (!wanted) return null;
+    const all = setup.projects ?? [];
+    return (
+      all.find((name) => bare(name) === wanted) ??
+      all.find((name) => bare(name).startsWith(wanted)) ??
+      all.find((name) => wanted.startsWith(bare(name))) ??
+      null
+    );
+  }
+
+  function sayWhere() {
+    mouth?.silence();
+    mouth?.speak(`We are on ${setup.project}.`);
+  }
+
+  async function switchTo(name) {
+    awaitingProject = null;
+    mouth?.silence();
+    try {
+      const answer = await fetch("/project", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const result = await answer.json();
+
+      if (!answer.ok) {
+        trace("UNKNOWN PROJECT", name);
+        log(`no project called "${name}"`, "bad");
+        mouth?.speak(`I don't know ${name}. I know ${(result.projects ?? []).join(", ")}.`);
+        return;
+      }
+
+      // Everything said before this was aimed at the old project, so it goes with it.
+      setup.project = result.project;
+      question = [];
+      live = "";
+      show();
+      trace("PROJECT", result.project);
+      log(`now working on ${result.project}`, "work");
+      sound.note("sent");
+      mouth?.speak(`Now working on ${result.project}. Anything else I do is in there.`);
+    } catch (err) {
+      log(String(err.message ?? err), "bad");
+    }
   }
 
   // Claude remembers the whole drive, which is what makes "and the tests?" mean
@@ -958,8 +1170,27 @@ function splitFrontEnd() {
       mouth.silence();   // you talked over it, so it stops and listens
     }
 
+    // A question it asked gets first refusal on what you said next. This is before
+    // the phrase reader on purpose: while it is waiting, "no" means no, and does not
+    // want treating as the start of a sentence.
+    if (answerGiven(text)) return;
+
     for (const step of reader.feed(text)) {
-      if (step.command) { obey(step.command); continue; }
+      if (step.command) { obey(step.command, step.spokenAs); continue; }
+
+      // "work on" is also something people say inside a perfectly ordinary question —
+      // "can you work on the login bug". So it only counts as changing project if
+      // what follows actually names one; otherwise both halves go back where they
+      // came from and it is a question like any other.
+      if (awaitingProject) {
+        const named = knownProject(step.say);
+        if (named) { switchTo(named); continue; }
+        question.push(`${awaitingProject} ${step.say}`);
+        trace("not a project, so just words", `${awaitingProject} ${step.say}`);
+        awaitingProject = null;
+        continue;
+      }
+
       question.push(step.say);
       trace("keeping", step.say);
     }
@@ -980,6 +1211,10 @@ function splitFrontEnd() {
       log(text.slice(0, 400));
       sound.note("ready");
       mouth?.speak(text);
+      if (endsWithAQuestion(text)) {
+        trace("waiting", "the answer ended in a question");
+        waitForAnswer(() => answerClaude("yes"), () => answerClaude("no"));
+      }
       return;
     }
     if (kind === "error") {

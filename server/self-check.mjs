@@ -64,7 +64,7 @@ function checkItKnowsItsOwnVoice() {
 // The gate decides what ever reaches Claude, and getting it wrong means either a
 // machine that ignores you or one that acts on the radio. Same trick as above: the
 // part of the page that reads speech into instructions is lifted out and run here.
-function checkTheGate() {
+function checkTheGate(livePhrases) {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
   const pieces = ["function howItSounds", "function nearlySame", "function phraseStartsAt", "const plainWords", "function makePhraseReader", "function readAsInstructions"]
     .map((start) => page.match(new RegExp(`${start}[\\s\\S]*?\\n}`)))
@@ -112,13 +112,9 @@ function checkTheGate() {
 
   // The phrases actually in use. A phrase is only worth having if it survives being
   // said normally, arrives in pieces, and never fires inside an ordinary question.
-  const REAL = {
-    send: ["all done", "that's it", "over to you", "off you go"],
-    read: ["read prompt", "read it back", "read that back", "read back", "say it back", "rep prompt"],
-    undo: ["take that back", "delete last", "delete the last", "scratch last"],
-    wipe: ["scratch that", "start again", "wipe that"],
-    forget: ["fresh start", "forget everything"],
-  };
+  // The phrases actually in use, read from the running server rather than copied.
+  // A copy drifts, and a test that passes against a stale copy is worse than none.
+  const REAL = livePhrases;
   const withRealPhrases = (chunks) => overPieces(chunks, REAL);
 
   const real = [
@@ -145,6 +141,16 @@ function checkTheGate() {
     ["forgetting the whole drive", ["fresh start"], "FORGET"],
     ["a question about starting things", ["how do i start the server"], "how do i start the server"],
     ["a question about deleting a file", ["delete the old migration file"], "delete the old migration file"],
+    ["changing project", ["work on the voice app"], "PROJECT | the voice app"],
+    ["changing project in pieces", ["work on", "the voice app"], "PROJECT | the voice app"],
+    ["asking which project", ["what project are we on"], "WHERE | are we on"],
+    ["work on inside an ordinary question", ["can you work on the login bug"], "can you | PROJECT | the login bug"],
+    ["asking what the commands are", ["what can i say"], "HELP"],
+    ["asking for them in pieces", ["what can", "i say"], "HELP"],
+    ["another way of asking", ["help me out"], "HELP"],
+    ["and another", ["say the commands"], "HELP"],
+    ["asking for help with the code is not the command", ["can you help me with this test"], "can you help me with this test"],
+    ["a question about what something can say", ["what can the server say back"], "what can the server say back"],
   ];
 
   for (const [name, chunks, expected] of real) {
@@ -261,8 +267,34 @@ try {
     everyWording.filter((phrase) => phrase.trim().split(/\s+/).length < 2).join(", ") || "all fine",
   );
 
+  // The help list is only worth having if it covers everything. It is built from the
+  // commands themselves so it cannot miss one, but a command with no description gets
+  // read out with no explanation, which is a poor showing — so say which.
+  const undescribed = spoken.map(([name]) => name).filter((name) => !(setup.whatEachDoes ?? {})[name]);
+  check(
+    "every command has something to say about itself",
+    undescribed.length === 0,
+    undescribed.join(", ") || "all described",
+  );
+
+  // These are single words, which is only safe because they are deaf outside the few
+  // seconds after it has asked you something. If one ever appears in the list above,
+  // that reasoning is gone and it would fire mid-question.
+  const answers = [setup.answers?.yes ?? [], setup.answers?.no ?? []].flat();
+  check("it can be answered yes or no", answers.length >= 4, `${answers.length} wordings`);
+  check(
+    "no answer word doubles as a command",
+    answers.every((word) => !everyWording.includes(word)),
+    answers.filter((word) => everyWording.includes(word)).join(", ") || "none overlap",
+  );
+  check(
+    "it stops to ask before reading out a long list",
+    Number(setup.readOutPage) >= 1 && Number(setup.readOutPage) < spoken.length,
+    `${setup.readOutPage} at a time, ${spoken.length} commands`,
+  );
+
   checkItKnowsItsOwnVoice();
-  checkTheGate();
+  checkTheGate(setup.phrases);
 } finally {
   server.kill("SIGTERM");
 }

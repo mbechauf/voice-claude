@@ -11,22 +11,47 @@ import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
 import {
+  ANSWERS,
+  ANSWER_WINDOW_MS,
   GATE,
   LISTENER,
   MODE,
   OPEN_TIMEOUT_MS,
   PHRASES,
   PAUSE_MS,
+  READ_OUT_PAGE,
   PORT,
-  PROJECT_DIR,
+  PROJECTS,
+  STARTING_PROJECT,
   SPEAKER,
   SPEAKER_RATE,
   SPEAKER_VOICE,
   VOICE_MODEL,
   VOICE_NAME,
+  WHAT_EACH_DOES,
 } from "./config.mjs";
 import { forgetConversation, startWork, stopWork } from "./claude-bridge.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
+
+// ------------------------------------------------------------- what we are on
+//
+// One thing decides where everything happens: which files get changed, what Claude
+// can see, and which repository an issue is filed against. It is said out loud and
+// repeated back, because a project chosen by mistake does its damage quietly while
+// you are watching the road.
+let project = STARTING_PROJECT;
+
+const nameOf = (dir) =>
+  Object.entries(PROJECTS).find(([, at]) => at === dir)?.[0] ?? path.basename(dir);
+
+// Claude is told, every time the project changes, that it is the whole world for
+// this conversation. The folder it runs in is the real boundary; this is so it does
+// not go looking for something helpful in a neighbouring project and change that.
+const boundary = () =>
+  `You are working on ${nameOf(project)}, at ${project}. Everything you are asked ` +
+  `for is about that project and nothing else: read, change and file issues only ` +
+  `there. If something you need appears to be in another project, say so and stop ` +
+  `rather than reaching into it.`;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -41,7 +66,7 @@ if (MODE === "realtime" && !OPENAI_KEY) {
 
 // The speaking rules only matter when nothing sits between Claude and the speaker.
 // In realtime mode the voice model rewrites Claude's answer, and applies its own.
-const briefing =
+const speakingRules =
   MODE === "realtime" ? "" : fs.readFileSync(path.join(here, "spoken-answer-rules.md"), "utf8");
 
 // Asking for a voice that isn't installed would leave someone in a car listening to
@@ -148,8 +173,13 @@ async function handle(req, res) {
       gate: GATE,
       pause: PAUSE_MS,
       phrases: PHRASES,
+      whatEachDoes: WHAT_EACH_DOES,
+      answers: ANSWERS,
+      answerWindow: ANSWER_WINDOW_MS,
+      readOutPage: READ_OUT_PAGE,
       openTimeout: OPEN_TIMEOUT_MS,
-      project: path.basename(PROJECT_DIR),
+      project: nameOf(project),
+      projects: Object.keys(PROJECTS),
     });
   }
 
@@ -197,7 +227,7 @@ async function handle(req, res) {
         console.log(`  ${kind}: ${text.slice(0, 120)}`);
         broadcast(kind, text);
       },
-      { briefing },
+      { briefing: `${speakingRules}\n\n${boundary()}`, project },
     );
     return send(res, 202, { started: true });
   }
@@ -216,6 +246,35 @@ async function handle(req, res) {
 
   if (url.pathname === "/trace") {
     return send(res, 200, trace.join("\n") || "nothing yet", "text/plain; charset=utf-8");
+  }
+
+  // Change what we are working on. Everything after this happens there.
+  if (url.pathname === "/project" && req.method === "POST") {
+    const { name } = await readBody(req);
+    const known = Object.keys(PROJECTS);
+    const wanted = String(name ?? "").toLowerCase().trim();
+
+    // Said out loud, so "the voice app", "voice app" and "voice" all have to land.
+    const bare = (text) => text.toLowerCase().replace(/^(the|my)\s+/, "").trim();
+    const match =
+      known.find((n) => bare(n) === bare(wanted)) ??
+      known.find((n) => bare(n).startsWith(bare(wanted))) ??
+      known.find((n) => bare(n).includes(bare(wanted)));
+
+    if (!match) {
+      return send(res, 404, { error: `I don't know ${name}`, projects: known });
+    }
+
+    project = PROJECTS[match];
+    // Its memory is of the other project, and carrying that across would be worse
+    // than useless — it would answer about the wrong code with total confidence.
+    forgetConversation();
+    console.log(`\n== now working on ${match} — ${project}`);
+    return send(res, 200, { project: match, at: project });
+  }
+
+  if (url.pathname === "/project") {
+    return send(res, 200, { project: nameOf(project), at: project, projects: Object.keys(PROJECTS) });
   }
 
   // Start the drive over. In realtime mode this happens as a side effect of asking
@@ -325,7 +384,7 @@ const server = net.createServer((socket) => {
 
 server.listen(PORT, () => {
   console.log(`\nvoice-claude is up.`);
-  console.log(`Working on:  ${PROJECT_DIR}`);
+  console.log(`Working on:  ${nameOf(project)} — ${project}`);
   if (MODE === "realtime") {
     console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
     console.log(`Cost:        billed per minute of audio, both directions.`);
