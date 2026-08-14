@@ -51,7 +51,9 @@ things you can say are instructions rather than part of the question:
 - **"all done"** — that is the question, send it. Also "that's it", "over to you", "off you go".
 - **"read prompt"** — read back what has been recorded so far, for when you cannot look. Also "read
   it back", "read that back", "say it back", and "rep prompt", which is what dictation makes of it.
-- **"take that back"** — drop the last thing you said, keep the rest. Also "delete last".
+- **"take that back"** — drop the last thing you said, keep the rest. Also "delete last". Said when
+  the question is already empty, it puts back whatever was last sent or wiped: nothing here is ever
+  destroyed, because a misheard command will happen and the fix is to make being wrong cost nothing.
 - **"scratch that"** — throw the whole question away and start it again. Also "start again".
 - **"fresh start"** — forget the whole drive, not just this question.
 - **"work on the voice app"** — change what you are working on. Also "switch to". Everything after
@@ -72,6 +74,11 @@ it reads a couple and asks whether you want the rest. While it is waiting on a q
 a bare **"yes"** or **"no"** is enough—no send phrase. Single words are safe here and nowhere else:
 they are deaf until it has asked you something, and go deaf again the instant you say anything at
 all, an answer or not. Anything other than yes or no is treated as speech, exactly as before.
+
+A phrase only counts as a command at the start or the end of what you said. In the middle of a
+sentence the same words are just words—"does it send it to the server", "can you work on the login
+bug". That rule is worth more than any amount of cleverness about which words to listen for, because
+it does not depend on the words at all.
 
 You also hear where things are without looking: two rising blips when a question has gone, a quiet
 low note every fifteen seconds while Claude is still working, and a falling note when an answer is

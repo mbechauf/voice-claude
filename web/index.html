@@ -573,7 +573,19 @@ function makePhraseReader(phrases) {
 
       let i = 0;
       while (i < pending.length) {
-        const said = commands.find((c) => phraseStartsAt(pending, i, c.words));
+        const found = commands.find((c) => phraseStartsAt(pending, i, c.words));
+
+        // Where it was said matters as much as what was said. People give an
+        // instruction at the start of a breath or at the end of one — "all done",
+        // "work on the voice app", "...and check the tests, that's it". In the
+        // middle of a sentence the same words are just words: "does it send it to
+        // the server", "can you work on the login bug". So a phrase only counts at
+        // an edge, and everything buried inside a sentence stays part of it.
+        //
+        // This is worth more than any amount of cleverness about which words to
+        // listen for, because it does not depend on the words at all.
+        const said = found && (i === 0 || i + found.words.length === pending.length) ? found : null;
+
         if (said) {
           flush();
           // It reports the words it swallowed, so a command that turns out not to
@@ -751,7 +763,13 @@ const sound = {
       ready: [[880, 660]],              // an answer is about to be read
       working: [[300, 300]],            // still going, quietly
       wiped: [[700, 380]],              // that has been thrown away
-      listening: [[660, 880]],          // your turn: a bare yes or no lands now
+      // Your turn: a bare yes or no lands right now. Two flat notes at the same
+      // pitch, which nothing else here does — every other note slides, so this one
+      // is recognisable without being listened for.
+      listening: [[880, 880], [880, 880]],
+      // And the window has shut again. Deliberately the same two notes falling away,
+      // so it is plainly the end of the thing the double note began.
+      tooLate: [[880, 620]],
     };
     const shape = shapes[which];
     if (!shape || !this.notes) return;
@@ -825,6 +843,12 @@ function splitFrontEnd() {
   // removes anything from it except sending it. A pause is a person thinking.
   const reader = makePhraseReader(setup.phrases);
   let question = [];
+
+  // Whatever the question was before the last thing that emptied it. A misheard
+  // command is going to happen — no amount of matching makes that impossible — so
+  // the answer is not to guess better but to make guessing wrong cost nothing.
+  // Taking it back puts the words straight back.
+  let lastEmptied = [];
   let live = "";        // the words being said right this second, not settled yet
   let working = false;
   let ears = null;
@@ -875,6 +899,7 @@ function splitFrontEnd() {
 
     sound.note("sent");
     trace("SENDING", asked);
+    lastEmptied = question;
     question = [];
     live = "";
     show();
@@ -888,6 +913,7 @@ function splitFrontEnd() {
 
   function wipe() {
     trace("WIPED", question.join(" "));
+    lastEmptied = question;
     question = [];
     live = "";
     mouth?.silence();      // saying it is also how you cut it off
@@ -958,6 +984,9 @@ function splitFrontEnd() {
       // is really on your thinking time, so it does not start until it stops talking.
       if (mouth?.busy) { waitTimer = setTimeout(closeUnlessStillTalking, 2_000); return; }
       trace("stopped waiting", "no answer");
+      // Say so. Silence after a question is indistinguishable from a window still
+      // being open, and the cost of guessing wrong is saying "yes" into nothing.
+      sound.note("tooLate");
       stopWaiting();
     };
     waitTimer = setTimeout(closeUnlessStillTalking, window);
@@ -1168,6 +1197,7 @@ function splitFrontEnd() {
   // something. This is how you tell it to stop remembering.
   function forgetTheDrive() {
     forgetDrive();
+    lastEmptied = question;
     question = [];
     live = "";
     show();
@@ -1205,6 +1235,21 @@ function splitFrontEnd() {
   // The last thing you said, taken out. Dictation hands over a piece each time you
   // pause, so a piece is roughly a sentence — which is what you would want back.
   function dropLast() {
+    // Nothing left to drop, but something was emptied a moment ago — so this means
+    // "undo that", which is what a person means by it. A wipe that cannot be undone
+    // is the only failure here that actually costs you anything.
+    if (!question.length && lastEmptied.length) {
+      question = lastEmptied;
+      lastEmptied = [];
+      trace("PUT BACK", question.join(" "));
+      log(`put back: ${question.join(" ")}`, "work");
+      show();
+      mouth?.silence();
+      sound.note("listening");
+      mouth?.speak(`Put back. ${question.join(" ")}`);
+      return;
+    }
+
     if (!question.length) {
       mouth?.silence();
       mouth?.speak("There is nothing to take back.");
