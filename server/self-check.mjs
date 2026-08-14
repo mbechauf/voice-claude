@@ -144,8 +144,14 @@ function checkTheGate(livePhrases) {
     ["changing project", ["work on the voice app"], "PROJECT | the voice app"],
     ["changing project in pieces", ["work on", "the voice app"], "PROJECT | the voice app"],
     ["asking which project", ["what project are we on"], "WHERE | are we on"],
-    ["work on inside an ordinary question", ["can you work on the login bug"], "can you work on the login bug"],
+    // Politely asked, this reads as an instruction and the reader treats it as one.
+    // What stops it becoming a switch is the next test but one: "the login bug" is
+    // not a project, so the page puts every word back into the question.
+    ["work on inside an ordinary question", ["can you work on the login bug"], "PROJECT | the login bug"],
     ["a command at the front counts", ["all done"], "SEND"],
+    ["asked politely still counts", ["can you switch to the claude voice app"], "PROJECT | the claude voice app"],
+    ["asked very politely", ["ok so could you please switch to the voice app"], "PROJECT | the voice app"],
+    ["politeness is not passed on to claude", ["can you all done"], "SEND"],
     ["a command at the end counts", ["check the tests all done"], "check the tests | SEND"],
     ["the same words mid-sentence do not", ["it said all done and then stopped"], "it said all done and then stopped"],
     ["switching at the front counts", ["work on the voice app"], "PROJECT | the voice app"],

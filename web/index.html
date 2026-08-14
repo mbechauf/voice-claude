@@ -542,6 +542,17 @@ const plainWords = (text) =>
  * It takes however many commands you give it — {send: "all done", ...} — because
  * there was never anything special about there being two of them.
  */
+// Words people put in front of an instruction without meaning anything by them.
+// "Can you switch to the voice app" is an instruction, not a sentence about
+// switching — but the words "can you" sit in front of it, so a command that only
+// counts at the very start does not count at all. These are skipped over when
+// deciding whether something was said at the front.
+const POLITENESS = new Set([
+  "can", "could", "would", "will", "please", "you", "we", "lets", "let's", "let",
+  "ok", "okay", "right", "now", "so", "and", "then", "hey", "just", "maybe",
+  "actually", "um", "uh", "er", "well", "i", "want", "need", "wanna", "like",
+]);
+
 function makePhraseReader(phrases) {
   // Each command may have several wordings; any of them means the same thing.
   // Longest first, so that when one wording begins like another the longer reading
@@ -583,10 +594,16 @@ function makePhraseReader(phrases) {
         // an edge, and everything buried inside a sentence stays part of it.
         //
         // This is worth more than any amount of cleverness about which words to
-        // listen for, because it does not depend on the words at all.
-        const said = found && (i === 0 || i + found.words.length === pending.length) ? found : null;
+        // listen for, because it does not depend on the words at all — as long as
+        // "the start" means what a person means by it, politeness included.
+        const onlyPolitenessBefore = pending.slice(0, i).every((word) => POLITENESS.has(word));
+        const atAnEdge = onlyPolitenessBefore || i + found?.words.length === pending.length;
+        const said = found && atAnEdge ? found : null;
 
         if (said) {
+          // The politeness in front of an instruction was never part of a question,
+          // so it goes with the instruction rather than into what Claude is asked.
+          if (onlyPolitenessBefore) spoken = [];
           flush();
           // It reports the words it swallowed, so a command that turns out not to
           // have been one can be put back into the question exactly as spoken.
