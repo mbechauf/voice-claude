@@ -854,7 +854,10 @@ function splitFrontEnd() {
 
   // Everything that was said, sent as one. This is the only thing that empties the
   // screen, and it only ever happens because you asked for it.
-  function send() {
+  async function send() {
+    // If you named a project in the same breath, that has to land first.
+    if (switching) { trace("waiting for the project to change"); await switching; }
+
     const asked = question.join(" ").trim();
     if (!asked) {
       // Nothing to send means you wanted quiet: hush, and drop what is running.
@@ -1052,19 +1055,23 @@ function splitFrontEnd() {
   // follows. Null when we are not waiting.
   let awaitingProject = null;
 
-  // Loosely, because it is spoken: "the voice app", "voice app" and "voice" are all
-  // the same thing, and dictation will drop a "the" without warning.
-  function knownProject(said) {
+  // A project is named at the front of what follows, and the rest is the question:
+  // "work on the voice app and check the tests" is a switch and then a question, not
+  // a project with a sentence stuck to it. So this takes the longest name that fits
+  // the opening words and hands back whatever is left over.
+  function projectAtTheFront(said) {
     const bare = (text) => text.toLowerCase().replace(/^(the|my)\s+/, "").trim();
-    const wanted = bare(said);
-    if (!wanted) return null;
-    const all = setup.projects ?? [];
-    return (
-      all.find((name) => bare(name) === wanted) ??
-      all.find((name) => bare(name).startsWith(wanted)) ??
-      all.find((name) => wanted.startsWith(bare(name))) ??
-      null
-    );
+    const spoken = bare(said);
+    if (!spoken) return null;
+
+    for (const { said: name, name: realName } of setup.projectNames ?? []) {
+      const wanted = bare(name);
+      if (spoken === wanted) return { project: realName, rest: "" };
+      if (spoken.startsWith(`${wanted} `)) {
+        return { project: realName, rest: said.slice(said.length - (spoken.length - wanted.length)).trim() };
+      }
+    }
+    return null;
   }
 
   function sayWhere() {
@@ -1072,9 +1079,15 @@ function splitFrontEnd() {
     mouth?.speak(`We are on ${setup.project}.`);
   }
 
+  // A question said in the same breath as the switch must not go to the project you
+  // just left, so sending waits for this to land.
+  let switching = null;
+
   async function switchTo(name) {
     awaitingProject = null;
     mouth?.silence();
+    let landed;
+    switching = new Promise((resolve) => { landed = resolve; });
     try {
       const answer = await fetch("/project", {
         method: "POST",
@@ -1101,6 +1114,9 @@ function splitFrontEnd() {
       mouth?.speak(`Now working on ${result.project}. Anything else I do is in there.`);
     } catch (err) {
       log(String(err.message ?? err), "bad");
+    } finally {
+      landed();
+      switching = null;
     }
   }
 
@@ -1183,11 +1199,15 @@ function splitFrontEnd() {
       // what follows actually names one; otherwise both halves go back where they
       // came from and it is a question like any other.
       if (awaitingProject) {
-        const named = knownProject(step.say);
-        if (named) { switchTo(named); continue; }
-        question.push(`${awaitingProject} ${step.say}`);
-        trace("not a project, so just words", `${awaitingProject} ${step.say}`);
+        const found = projectAtTheFront(step.say);
         awaitingProject = null;
+        if (found) {
+          switchTo(found.project);
+          if (found.rest) { question.push(found.rest); trace("keeping", found.rest); }
+          continue;
+        }
+        question.push(`${awaitingProject ?? ""} ${step.say}`.trim());
+        trace("not a project, so just words", step.say);
         continue;
       }
 

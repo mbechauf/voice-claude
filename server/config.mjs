@@ -19,16 +19,43 @@ export const PORT = Number(process.env.VOICE_CLAUDE_PORT ?? 8787);
 // of the folder. Add as many as you like.
 const CODE = path.join(homedir(), "Code");
 
+// Several names each, for the same reason the commands have several wordings: you
+// call a thing whatever comes to mind, and dictation drops or adds a word without
+// telling you. The first name is the one it says back to you.
 export const PROJECTS = {
-  "the advisor app": path.join(CODE, "Advisor-LLM"),
-  "the voice app": path.join(CODE, "voice-claude"),
-  "the resume builder": path.join(CODE, "resume_builder"),
-  "the financial overview": path.join(CODE, "financial-overview"),
-  "aws admin": path.join(CODE, "aws-admin"),
+  "the advisor app": {
+    at: path.join(CODE, "Advisor-LLM"),
+    alsoCalled: ["advisor", "the advisor", "advisor llm", "the advisor project"],
+  },
+  "the voice app": {
+    at: path.join(CODE, "voice-claude"),
+    alsoCalled: [
+      "voice", "the voice", "voice claude", "the voice claude app", "voice claude app",
+      "the voice project", "this app", "yourself",
+    ],
+  },
+  "the resume builder": {
+    at: path.join(CODE, "resume_builder"),
+    alsoCalled: ["resume", "the resume", "resume builder", "the cv builder"],
+  },
+  "the financial overview": {
+    at: path.join(CODE, "financial-overview"),
+    alsoCalled: ["financial", "the financials", "financial overview"],
+  },
+  "aws admin": {
+    at: path.join(CODE, "aws-admin"),
+    alsoCalled: ["the aws admin", "aws", "the aws project"],
+  },
 };
 
+// Every name it answers to, longest first — so "the voice claude app" is recognised
+// as that rather than as "the voice" with three stray words after it.
+export const EVERY_PROJECT_NAME = Object.entries(PROJECTS)
+  .flatMap(([name, { alsoCalled = [] }]) => [name, ...alsoCalled].map((said) => ({ said, name })))
+  .sort((a, b) => b.said.split(" ").length - a.said.split(" ").length);
+
 // Where a drive starts, before you have said otherwise.
-export const STARTING_PROJECT = process.env.VOICE_CLAUDE_PROJECT ?? PROJECTS["the advisor app"];
+export const STARTING_PROJECT = process.env.VOICE_CLAUDE_PROJECT ?? PROJECTS["the advisor app"].at;
 
 // ------------------------------------------------------------ the voice layer
 //

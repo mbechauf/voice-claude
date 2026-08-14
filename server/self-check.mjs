@@ -178,6 +178,44 @@ function checkTheGate(livePhrases) {
   }
 }
 
+// Naming a project out loud, in the middle of a sentence. Getting this wrong sends
+// the question to the project you just left, which answers confidently about the
+// wrong code — so it is worth testing rather than discovering at seventy miles an hour.
+function checkPickingAProject(names) {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const source = page.match(/  function projectAtTheFront[\s\S]*?\n  }/);
+  if (!source) {
+    check("the page can pick a project out of a sentence", false, "couldn't find that part");
+    return;
+  }
+
+  const pick = new Function(
+    "setup",
+    `${source[0].replace(/^  /gm, "")}; return projectAtTheFront;`,
+  )({ projectNames: names });
+
+  const shape = (said) => {
+    const found = pick(said);
+    return found ? `${found.project}${found.rest ? ` + "${found.rest}"` : ""}` : "not a project";
+  };
+
+  const cases = [
+    ["its plain name", "the voice app", "the voice app"],
+    ["without the the", "voice app", "the voice app"],
+    ["what he actually calls it", "the voice claude app", "the voice app"],
+    ["the longer name is not read as the shorter one", "voice claude app", "the voice app"],
+    ["a name with the question stuck to it", "the voice app and check the tests", 'the voice app + "and check the tests"'],
+    ["the advisor app", "advisor", "the advisor app"],
+    ["something that is not a project at all", "the login bug", "not a project"],
+    ["a project named part-way through is not one", "some thing the voice app", "not a project"],
+  ];
+
+  for (const [name, said, expected] of cases) {
+    const got = shape(said);
+    check(`naming a project: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+  }
+}
+
 async function waitForServer() {
   for (let i = 0; i < 50; i += 1) {
     try {
@@ -295,6 +333,7 @@ try {
 
   checkItKnowsItsOwnVoice();
   checkTheGate(setup.phrases);
+  checkPickingAProject(setup.projectNames);
 } finally {
   server.kill("SIGTERM");
 }

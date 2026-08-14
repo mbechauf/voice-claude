@@ -21,6 +21,7 @@ import {
   PAUSE_MS,
   READ_OUT_PAGE,
   PORT,
+  EVERY_PROJECT_NAME,
   PROJECTS,
   STARTING_PROJECT,
   SPEAKER,
@@ -42,7 +43,7 @@ import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 let project = STARTING_PROJECT;
 
 const nameOf = (dir) =>
-  Object.entries(PROJECTS).find(([, at]) => at === dir)?.[0] ?? path.basename(dir);
+  Object.entries(PROJECTS).find(([, p]) => p.at === dir)?.[0] ?? path.basename(dir);
 
 // Claude is told, every time the project changes, that it is the whole world for
 // this conversation. The folder it runs in is the real boundary; this is so it does
@@ -180,6 +181,9 @@ async function handle(req, res) {
       openTimeout: OPEN_TIMEOUT_MS,
       project: nameOf(project),
       projects: Object.keys(PROJECTS),
+      // Every name each answers to, longest first, so the phone can pick a project
+      // out of the front of a sentence and leave the rest as the question.
+      projectNames: EVERY_PROJECT_NAME,
     });
   }
 
@@ -252,20 +256,18 @@ async function handle(req, res) {
   if (url.pathname === "/project" && req.method === "POST") {
     const { name } = await readBody(req);
     const known = Object.keys(PROJECTS);
-    const wanted = String(name ?? "").toLowerCase().trim();
+    const wanted = String(name ?? "").toLowerCase().trim().replace(/^(the|my)\s+/, "");
 
-    // Said out loud, so "the voice app", "voice app" and "voice" all have to land.
-    const bare = (text) => text.toLowerCase().replace(/^(the|my)\s+/, "").trim();
-    const match =
-      known.find((n) => bare(n) === bare(wanted)) ??
-      known.find((n) => bare(n).startsWith(bare(wanted))) ??
-      known.find((n) => bare(n).includes(bare(wanted)));
+    // Longest name first, so "the voice claude app" is not read as "the voice".
+    const match = EVERY_PROJECT_NAME.find(
+      ({ said }) => said.replace(/^(the|my)\s+/, "") === wanted,
+    )?.name;
 
     if (!match) {
       return send(res, 404, { error: `I don't know ${name}`, projects: known });
     }
 
-    project = PROJECTS[match];
+    project = PROJECTS[match].at;
     // Its memory is of the other project, and carrying that across would be worse
     // than useless — it would answer about the wrong code with total confidence.
     forgetConversation();
