@@ -243,6 +243,16 @@ export const ALLOWED_TOOLS = [
   "Bash(gh issue create:*)",
   "Bash(gh issue list:*)",
   "Bash(gh issue view:*)",
+
+  // Checking its own work. Added 2026-08-14: it was changing code and then unable
+  // to find out whether the change was any good, which is half a job. These two run
+  // the checks and nothing else — starting servers and installing things stay off,
+  // because those have effects that outlive the drive.
+  //
+  // It cannot add to this list itself, and that is the point: something that can
+  // widen its own permissions has none. Widening it is a decision made here, awake.
+  "Bash(npm run check:*)",
+  "Bash(npm test:*)",
 ];
 
 // How long to let a single piece of work run before giving up on it.

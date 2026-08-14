@@ -52,7 +52,13 @@ const boundary = () =>
   `You are working on ${nameOf(project)}, at ${project}. Everything you are asked ` +
   `for is about that project and nothing else: read, change and file issues only ` +
   `there. If something you need appears to be in another project, say so and stop ` +
-  `rather than reaching into it.`;
+  `rather than reaching into it.` +
+  (project === PROJECTS["the voice app"].at
+    ? ` You are working on the thing you are being spoken through. What the phone ` +
+      `decided, moment by moment, is in .voice-claude/trace.log — read it rather than ` +
+      `guessing at why something behaved oddly. Running "npm run check" is allowed ` +
+      `and is how you find out whether a change is any good.`
+    : "");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -82,6 +88,18 @@ if (SPEAKER === "mac" && speaker !== "mac") {
 
 const listeners = new Set();
 const trace = [];
+
+// The log of what the phone decided, written into this app's own folder as well as
+// shown here. Over the network it needs a command nobody should be handing out; as
+// a file, whatever is working on this app can simply read it. Ignored by version
+// control, and it never leaves the machine.
+const TRACE_FILE = path.join(root, ".voice-claude", "trace.log");
+try {
+  fs.mkdirSync(path.dirname(TRACE_FILE), { recursive: true });
+  fs.writeFileSync(TRACE_FILE, `-- started ${new Date().toISOString()}\n`);
+} catch (err) {
+  console.error(`couldn't open the log: ${err.message}`);
+}
 
 function broadcast(kind, text) {
   const payload = `data: ${JSON.stringify({ kind, text })}\n\n`;
@@ -245,6 +263,7 @@ async function handle(req, res) {
     trace.push(line);
     while (trace.length > 300) trace.shift();
     console.log(`   · ${line}`);
+    fs.appendFile(TRACE_FILE, `${line}\n`, () => {});
     return send(res, 204, "");
   }
 

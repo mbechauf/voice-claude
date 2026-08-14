@@ -988,19 +988,29 @@ function splitFrontEnd() {
     send();
   }
 
+  const saidExactly = (text, wordings) => {
+    const said = plainWords(text).join(" ");
+    if (!said) return false;
+    return [wordings].flat().some((wording) => plainWords(wording).join(" ") === said);
+  };
+
+  // Is this the whole of an answer to a question it asked, and nothing else? Asked
+  // separately from acting on it, because the echo test upstream has to know.
+  const isBareAnswer = (text) =>
+    Boolean(waitingOn) &&
+    (saidExactly(text, setup.answers?.yes ?? []) || saidExactly(text, setup.answers?.no ?? []));
+
   // Whole utterance only. "yes" is an answer; "yes and check the tests" is a
   // sentence, and goes where sentences go. Either way the waiting is over.
   function answerGiven(text) {
     if (!waitingOn) return false;
     const said = plainWords(text).join(" ");
     if (!said) return false;
-    const matches = (wordings) =>
-      [wordings].flat().some((wording) => plainWords(wording).join(" ") === said);
 
     const { onYes, onNo } = waitingOn;
     stopWaiting();
-    if (matches(setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
-    if (matches(setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
+    if (saidExactly(text, setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
+    if (saidExactly(text, setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
     trace("stopped waiting", `said something else: ${said}`);
     return false;   // not an answer — carry on and treat it as speech
   }
@@ -1178,6 +1188,17 @@ function splitFrontEnd() {
 
   function heard(text) {
     live = "";
+
+    // A one-word answer to a question it has just asked goes through before anything
+    // else, echo test included. The echo test only counts words longer than three
+    // letters, so "yes" and "no" leave nothing behind to compare and were being
+    // thrown away as its own voice — silently, at the exact moment you were most
+    // likely to say them, which is while it is still finishing the question.
+    if (isBareAnswer(text)) {
+      mouth?.silence();
+      answerGiven(text);
+      return;
+    }
 
     // Its own voice off the windscreen is not part of your question. This is the
     // only thing standing between always-listening and it writing down its own answer.
