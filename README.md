@@ -45,37 +45,38 @@ back to the phone's own rather than leaving you with silence in a car.
 Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
 so Safari warns the first time; accept it and it stays accepted.
 
-Then say **"Claude go"**, ask for what you want, and say **"Claude stop"**. Nothing else you say in
-the car ever reaches Claude.
+Then talk. Everything you say builds up in one box on the screen, in full, and stays there. When the
+question is finished, say **"all done"** and it goes. Say **"scratch that"** to wipe it and start the
+question again.
 
-That gate is the whole design, and it replaced an earlier version that tried to work out for itself
-when you were talking to it. A car is full of talk that was never meant for the machine—the radio, a
-passenger, thinking out loud—and a pause in the middle of a thought is not the end of a question.
-Guessing wrong in either direction is exhausting, so it does not guess.
+Nothing else does anything. There is no clock: a pause is a person thinking, not a person finished,
+so no length of silence ever sends a question or throws one away. That was the whole failure of the
+version before this one.
 
-- **Nothing is sent until you close.** Take as long as you like, pause, change your mind, start the
-  sentence again. It is all one question, and it goes when you say so. The phone stops listening on
-  its own after a couple of seconds of quiet and throws away whatever it had half-heard when it
-  does, so those words are caught and kept before it is started again—otherwise pausing mid-question
-  loses the end of your sentence, which looks exactly like it forgetting what you were saying.
-- **Opening is also how you interrupt.** Say "Claude go" over an answer and it stops mid-sentence
-  and takes down what you say next. It knows its own voice coming back off the windscreen from
+- **Everything is on the screen, in full, always.** The question builds up in front of you and stays
+  there until it is sent. The phone stops listening on its own after a couple of seconds of quiet
+  and discards whatever it had half-heard when it does, so those words are caught and kept before it
+  is started again—otherwise pausing mid-question loses the end of your sentence.
+- **Talking over an answer stops it.** It knows its own voice coming back off the windscreen from
   yours, so it will not interrupt itself.
-- **"Claude stop" on its own means be quiet and drop it**—it shuts up and abandons whatever Claude
-  is working on.
-- **A rising note means it is taking this down, a falling note means it has gone.** You cannot look
+- **"all done" with nothing said means be quiet and drop it**—it shuts up and abandons whatever
+  Claude is working on.
+- **A rising note means the question was wiped, a falling note means it has gone.** You cannot look
   at the phone, so it says so out loud.
-- Say **"start over"** inside the gate to forget the drive so far.
+- Say **"start over"** as the whole question to forget the drive so far.
+- The big button does the same as "all done", for when the road is too loud to be heard over. It is
+  a backstop, not the way in—nobody should be aiming at a phone at seventy miles an hour.
 
-The name gets misheard constantly—"cloud", "clod", "cold", "clawed"—so the phrases are matched by
-how they sound rather than how they are spelled, while the short word after the name is matched
-strictly, which is what keeps ordinary sentences from opening it by accident. Whether that gate
-behaves is the entire feel of the thing, so `npm run check` exercises it directly rather than
-leaving a car to find out.
+The phrases are deliberately not a name. Dictation is trained on ordinary speech, so a proper noun
+it has never met comes back as whatever ordinary word sounds nearest: "Claude" arrived as cloud,
+clod, cold and clawed, and "Claude go" as "Claude girl". These are plain words it cannot get wrong,
+in an order nobody says by accident, and neither turns up inside a question about code.
 
-If you open the gate and then forget about it, it sends what it has after thirty seconds of silence
-rather than staying open all the way home. Tapping the big button while it is talking also shuts it
-up without ending the session.
+Two things underneath make them reliable, and both are exercised by `npm run check` rather than left
+for a drive to discover. Phrases are matched by how they sound rather than how they are spelled. And
+they are read across a running stream rather than inside each piece of speech on its own—because the
+phone hands over whatever it had when you paused, so "all" pause "done" arrives as two separate
+pieces, and looking inside each one found nothing while the words fell through into the question.
 
 Because there is no longer a model in between to rewrite Claude's answer, Claude itself is told to
 write speech rather than prose—short, no markdown, no code read aloud, findings one at a time. Those
@@ -83,7 +84,7 @@ rules are in `server/spoken-answer-rules.md` and are sent once at the start of a
 
 ### What you give up
 
-Saying two extra phrases per question. That is genuinely it: the realtime model's advantage was
+Saying two words at the end of a question. That is genuinely it: the realtime model's advantage was
 knowing when you had finished a thought, and saying so yourself turns out to be both cheaper and
 more reliable than a machine inferring it over road noise.
 
@@ -93,10 +94,11 @@ pocket, screen off"—see issue #2. Real drives with the screen on come first an
 ### Changing the phrases
 
 ```bash
-VOICE_CLAUDE_OPEN="hey claude" VOICE_CLAUDE_CLOSE="that's it" npm start
+VOICE_CLAUDE_OPEN="wipe that" VOICE_CLAUDE_CLOSE="over to you" npm start
 ```
 
-Two or more words each. A single word opens by accident all day.
+Two or more words each, made of words dictation meets every day. A single word fires by accident all
+day long, and a rare or invented word never gets transcribed as itself.
 
 ### Changing the voice
 

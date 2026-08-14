@@ -481,7 +481,10 @@ function howItSounds(word) {
   return key.slice(0, 4);
 }
 
-function nearlySame(heard, wanted) {
+// `leniently` is only ever true for words after the first one in a phrase. The
+// first word is the anchor and has to be earned properly; once it has landed, the
+// rest can be given the benefit of the doubt without opening the floodgates.
+function nearlySame(heard, wanted, leniently = false) {
   if (heard === wanted) return true;
   if (wanted.length > 3 && howItSounds(heard) === howItSounds(wanted)) return true;
 
@@ -489,10 +492,8 @@ function nearlySame(heard, wanted) {
   if (wanted.length >= 3 && heard.startsWith(wanted)) return true;
 
   // Very short words carry almost no sound to match on, so "go" comes back as
-  // "girl", "goal", "gold" and there is no telling them apart. On its own that
-  // would be far too loose — but these only ever count directly after the name,
-  // and nobody says the name by accident.
-  if (wanted.length <= 3) {
+  // "girl", "goal", "gold" and there is no telling them apart.
+  if (leniently && wanted.length <= 3) {
     return heard[0] === wanted[0] && heard.length <= wanted.length + 4;
   }
 
@@ -517,7 +518,7 @@ function nearlySame(heard, wanted) {
 
 function phraseStartsAt(words, index, phrase) {
   if (index + phrase.length > words.length) return false;
-  return phrase.every((wanted, offset) => nearlySame(words[index + offset], wanted));
+  return phrase.every((wanted, offset) => nearlySame(words[index + offset], wanted, offset > 0));
 }
 
 const plainWords = (text) =>
@@ -545,7 +546,7 @@ function makePhraseReader(openPhrase, closePhrase) {
   function mightBecome(words, at, phrase) {
     if (words.length - at >= phrase.length) return false;
     for (let k = 0; at + k < words.length; k += 1) {
-      if (!nearlySame(words[at + k], phrase[k])) return false;
+      if (!nearlySame(words[at + k], phrase[k], k > 0)) return false;
     }
     return true;
   }

@@ -109,6 +109,35 @@ function checkTheGate() {
     const got = overPieces(chunks);
     check(`across pieces: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
   }
+
+  // The phrases actually in use. A phrase is only worth having if it survives being
+  // said normally, arrives in pieces, and never fires inside an ordinary question.
+  const withRealPhrases = (chunks, open = "scratch that", close = "all done") => {
+    const reader = makeReader(open, close);
+    const out = [];
+    for (const chunk of chunks) {
+      for (const step of reader.feed(chunk)) {
+        out.push(step.open ? "WIPE" : step.close ? "SEND" : step.say);
+      }
+    }
+    if (reader.held()) out.push(reader.held());
+    return out.join(" | ");
+  };
+
+  const real = [
+    ["sending", ["what changed in the last commit", "all done"], "what changed in the last commit | SEND"],
+    ["sending when it arrives in pieces", ["what changed", "all", "done"], "what changed | SEND"],
+    ["starting the question again", ["no scratch that", "what about the tests"], "no | WIPE | what about the tests"],
+    ["a question about sending things is not a send", ["does it send it to the server"], "does it send it to the server"],
+    ["a question containing all", ["are all the tests passing"], "are all the tests passing"],
+    ["a question containing done", ["is the migration done yet"], "is the migration done yet"],
+    ["and containing both, apart", ["are all the migrations done"], "are all the migrations done"],
+  ];
+
+  for (const [name, chunks, expected] of real) {
+    const got = withRealPhrases(chunks);
+    check(`the real phrases: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+  }
   const shape = (text) =>
     read(text, "claude go", "claude stop")
       .map((step) => (step.open ? "OPEN" : step.close ? "CLOSE" : step.say))
