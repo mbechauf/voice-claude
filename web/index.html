@@ -29,11 +29,16 @@
   /* While it is talking the whole button becomes a way to shut it up, because that
      is the one thing you want within reach without aiming. */
   button.talking { background: #5a4030; }
-  /* Dim when it is only overhearing you, bright when it is taking it down. The
-     difference has to be obvious at a glance, because mistaking one for the other is
-     what makes it feel like it is losing your words. */
-  #heard { min-height: 1.5rem; font-size: 1.05rem; padding: 0.25rem 0; color: #6b675e; }
-  #heard.keeping { color: #8fc7a8; }
+  /* The question being built, in full, always. Nothing in here ever disappears on
+     its own — it goes when you send it, and not before. */
+  #prompt {
+    min-height: 5.5rem; max-height: 40dvh; overflow-y: auto;
+    font-size: 1.15rem; line-height: 1.45; color: #f0ece2;
+    background: #1c1c16; border: 1px solid #2e2e26; border-radius: 0.75rem;
+    padding: 0.75rem; margin: 0.25rem 0;
+  }
+  #prompt:empty::before { content: "nothing yet — just talk"; color: #6b675e; }
+  #prompt .live { color: #9b968a; }
   #end {
     background: none; border: 0; color: #6b675e; font-size: 0.85rem;
     width: auto; padding: 0.5rem 0; margin: 0; text-decoration: underline;
@@ -54,15 +59,15 @@
   <div id="state">not connected</div>
 </header>
 
-<button id="go">Start talking</button>
+<div id="prompt"></div>
 
-<div id="heard"></div>
+<button id="go">Start talking</button>
 <button id="end" hidden>end session</button>
 <div id="log"></div>
 
 <script type="module">
 const stateEl = document.getElementById("state");
-const heardEl = document.getElementById("heard");
+const promptEl = document.getElementById("prompt");
 const logEl = document.getElementById("log");
 const goBtn = document.getElementById("go");
 const endBtn = document.getElementById("end");
@@ -476,13 +481,22 @@ function howItSounds(word) {
   return key.slice(0, 4);
 }
 
-// Short words are matched strictly. Only the longer ones — the name — get the
-// benefit of the doubt, which is what keeps "go" from matching everything.
 function nearlySame(heard, wanted) {
   if (heard === wanted) return true;
   if (wanted.length > 3 && howItSounds(heard) === howItSounds(wanted)) return true;
 
-  const allowed = wanted.length <= 3 ? 0 : wanted.length <= 5 ? 1 : 2;
+  // "stop" comes back as "stopped", "stopping". The word is in there.
+  if (wanted.length >= 3 && heard.startsWith(wanted)) return true;
+
+  // Very short words carry almost no sound to match on, so "go" comes back as
+  // "girl", "goal", "gold" and there is no telling them apart. On its own that
+  // would be far too loose — but these only ever count directly after the name,
+  // and nobody says the name by accident.
+  if (wanted.length <= 3) {
+    return heard[0] === wanted[0] && heard.length <= wanted.length + 4;
+  }
+
+  const allowed = wanted.length <= 5 ? 1 : 2;
   if (Math.abs(heard.length - wanted.length) > allowed) return false;
 
   // How many single-letter changes turn one into the other.
@@ -510,43 +524,77 @@ const plainWords = (text) =>
   text.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
 
 /**
- * Read a piece of speech as a series of things to do. Kept separate from everything
- * else, and free of any notion of microphones or Claude, because whether the gate
- * behaves is the whole feel of the thing and it needs testing on its own.
+ * Reads speech as it arrives and says what to do about it.
  *
- * Returns a list of {open} / {say: "..."} / {close} in the order they were spoken,
- * so a whole question said in one breath — open phrase, question, close phrase —
- * works exactly like one said slowly over three.
+ * The phone does not hand over sentences; it hands over whatever it had when you
+ * paused. Say "Claude" — pause — "stop", and those arrive as two separate pieces,
+ * which is why looking for the phrase inside each piece on its own found nothing and
+ * the words fell through as part of the question. So this keeps one running stream
+ * across every piece, and when the words at the end could still turn into a phrase
+ * once you finish saying it, it holds them back rather than committing them.
+ *
+ * Gives back {open} / {say: "..."} / {close} in the order they were spoken, so a
+ * whole question said in one breath behaves exactly like one said over three.
  */
-function readAsInstructions(text, openPhrase, closePhrase) {
+function makePhraseReader(openPhrase, closePhrase) {
   const open = plainWords(openPhrase);
   const close = plainWords(closePhrase);
-  const words = plainWords(text);
-  const steps = [];
-  let spoken = [];
+  let pending = [];
 
-  const flush = () => {
-    if (spoken.length) steps.push({ say: spoken.join(" ") });
-    spoken = [];
-  };
-
-  for (let i = 0; i < words.length; ) {
-    // The closing phrase is checked first: when one phrase is a prefix of the other
-    // — as "claude go" and "claude stop" nearly are — the longer reading is meant.
-    if (phraseStartsAt(words, i, close)) {
-      flush();
-      steps.push({ close: true });
-      i += close.length;
-    } else if (phraseStartsAt(words, i, open)) {
-      flush();
-      steps.push({ open: true });
-      i += open.length;
-    } else {
-      spoken.push(words[i]);
-      i += 1;
+  // Could these last few words still become the phrase, once more words arrive?
+  function mightBecome(words, at, phrase) {
+    if (words.length - at >= phrase.length) return false;
+    for (let k = 0; at + k < words.length; k += 1) {
+      if (!nearlySame(words[at + k], phrase[k])) return false;
     }
+    return true;
   }
-  flush();
+
+  return {
+    feed(text) {
+      pending.push(...plainWords(text));
+      const steps = [];
+      let spoken = [];
+      const flush = () => {
+        if (spoken.length) steps.push({ say: spoken.join(" ") });
+        spoken = [];
+      };
+
+      let i = 0;
+      while (i < pending.length) {
+        // The closing phrase is checked first: when one phrase begins like the other
+        // — as "claude go" and "claude stop" do — the longer reading is meant.
+        if (phraseStartsAt(pending, i, close)) {
+          flush();
+          steps.push({ close: true });
+          i += close.length;
+        } else if (phraseStartsAt(pending, i, open)) {
+          flush();
+          steps.push({ open: true });
+          i += open.length;
+        } else if (mightBecome(pending, i, open) || mightBecome(pending, i, close)) {
+          break; // hold these; the rest of the phrase may be on its way
+        } else {
+          spoken.push(pending[i]);
+          i += 1;
+        }
+      }
+
+      flush();
+      pending = pending.slice(i);
+      return steps;
+    },
+    // What is being held back, so it can still be shown while you say it.
+    held: () => pending.join(" "),
+  };
+}
+
+// One piece of speech on its own, for when there is no stream to keep.
+function readAsInstructions(text, openPhrase, closePhrase) {
+  const reader = makePhraseReader(openPhrase, closePhrase);
+  const steps = reader.feed(text);
+  const held = reader.held();
+  if (held) steps.push({ say: held });
   return steps;
 }
 
@@ -585,7 +633,7 @@ function beep(which) {
 function splitFrontEnd() {
   const talking = {
     onStart: () => paint(),
-    onFinish: () => { paint(); if (!open) idleState(); },
+    onFinish: () => { paint(); idleState(); },
   };
 
   // The phone's own voice is either the choice or the safety net, depending on what
@@ -601,64 +649,49 @@ function splitFrontEnd() {
       ? macMouth({ fallback: phoneVoice, ...talking, onTrouble: (m) => log(m, "bad") })
       : phoneVoice;
 
+  // One running transcript of everything you have said since the last question went
+  // off. It is always being written to, it is always on the screen, and nothing
+  // removes anything from it except sending it. A pause is a person thinking.
+  const reader = makePhraseReader(setup.openPhrase, setup.closePhrase);
+  let question = [];
+  let live = "";        // the words being said right this second, not settled yet
   let working = false;
   let ears = null;
 
-  // By default there is no gate at all: it is always taking down what you say, and a
-  // few seconds of silence is what sends it. Asking someone to announce themselves
-  // before every question is ceremony, and ceremony in a car is friction.
-  const always = setup.gate !== "phrases";
-  let open = false;
-  let collected = [];
-  let forgetTimer = null;
+  function show() {
+    const settled = [question.join(" "), reader.held()].filter(Boolean).join(" ");
+    promptEl.textContent = settled;
+    if (live) {
+      const tail = document.createElement("span");
+      tail.className = "live";
+      tail.textContent = `${settled ? " " : ""}${live}`;
+      promptEl.append(tail);
+    }
+    promptEl.scrollTop = promptEl.scrollHeight;
+    paint();
+  }
 
-  // The button is the same gate the phrases open, and says which state it is in.
-  // Dictation is imperfect enough that there has to be a way through it that cannot
-  // be misheard — and knowing at a glance whether you are being taken down matters
-  // more than any of it.
   function paint() {
     if (mouth?.busy) { goBtn.textContent = "Quiet"; goBtn.className = "talking"; }
-    else if (collected.length) { goBtn.textContent = "Send it now"; goBtn.className = "open"; }
-    else if (open) { goBtn.textContent = "Listening"; goBtn.className = "open"; }
-    else { goBtn.textContent = "Ask something"; goBtn.className = "live"; }
-    heardEl.className = open ? "keeping" : "";
+    else if (question.length) { goBtn.textContent = "Send"; goBtn.className = "open"; }
+    else { goBtn.textContent = "Listening"; goBtn.className = "live"; }
   }
 
   function idleState() {
-    if (always) {
-      setState(working ? "working — talk over it whenever you like" : "listening — just talk");
-    } else {
-      setState(`not recording — say "${setup.openPhrase}"`);
-    }
-    paint();
+    if (working) { setState("working — talk whenever you like"); return; }
+    setState(
+      question.length
+        ? `say "${setup.closePhrase}" to send it. No hurry.`
+        : `listening — say "${setup.openPhrase}" to wipe it and start again`,
+    );
   }
 
-  // A pause is a person thinking, not a person finished. With the gate on, nothing
-  // is ever sent by a clock — it waits for you to say so, however long that takes.
-  function stillThere() {
-    clearTimeout(forgetTimer);
-    const giveUpAfter = always ? (setup.pause ?? 3_500) : (setup.openTimeout ?? 0);
-    if (giveUpAfter > 0) forgetTimer = setTimeout(closeGate, giveUpAfter);
-  }
-
-  function openGate() {
-    if (open) return;
-    open = true;
-    collected = [];
-    mouth?.silence();       // opening the gate is also how you cut it off
-    beep("open");
-    heardEl.textContent = "";
-    setState(`recording — say "${setup.closePhrase}" when you're done. No hurry.`);
-    paint();
-    stillThere();
-    trace("GATE OPEN");
-  }
-
-  function closeGate() {
-    trace("GATE CLOSE", open ? `collected "${collected.join(" ")}"` : "was already shut");
-    clearTimeout(forgetTimer);
-    if (!open) {
-      // Closing something that was never opened means "be quiet and drop it".
+  // Everything that was said, sent as one. This is the only thing that empties the
+  // screen, and it only ever happens because you asked for it.
+  function send() {
+    const asked = question.join(" ").trim();
+    if (!asked) {
+      // Nothing to send means you wanted quiet: hush, and drop what is running.
       mouth?.silence();
       if (working) { stopWork(); working = false; log("stopped", "work"); }
       beep("close");
@@ -666,62 +699,56 @@ function splitFrontEnd() {
       return;
     }
 
-    // With no gate it never stops listening; sending is just the end of a question.
-    open = always;
     beep("close");
-    const question = collected.join(" ").trim();
-    collected = [];
-    heardEl.textContent = "";
+    trace("SENDING", asked);
+    question = [];
+    live = "";
+    show();
+    log(`you: ${asked}`, "you");
 
-    if (!question) { idleState(); return; }
-
-    // The one thing Claude cannot be asked to do, because it is about the
-    // conversation itself rather than the code.
-    if (/^(start over|new conversation|forget (that|everything)|reset)$/.test(question)) {
+    // The one thing Claude cannot be asked, because it is about this conversation
+    // rather than about the code.
+    if (/^(start over|new conversation|forget (that|everything)|reset)$/.test(asked)) {
       forgetDrive();
       log("starting fresh", "work");
       mouth?.speak("Starting fresh.");
       return;
     }
 
-    log(`you: ${question}`, "you");
     working = true;
     setState("thinking…");
-    ask(question).catch((err) => log(String(err.message ?? err), "bad"));
+    ask(asked).catch((err) => log(String(err.message ?? err), "bad"));
+  }
+
+  function wipe() {
+    trace("WIPED", question.join(" "));
+    question = [];
+    live = "";
+    mouth?.silence();      // saying it is also how you cut it off
+    beep("open");
+    show();
+    setState("starting the question again — go ahead");
   }
 
   function heard(text) {
-    // Its own voice off the windscreen is not a question. This is the only thing
-    // standing between "always listening" and it talking to itself in circles.
+    live = "";
+
+    // Its own voice off the windscreen is not part of your question. This is the
+    // only thing standing between always-listening and it writing down its own answer.
     if (mouth?.busy) {
       if (soundsLikeItself(text, mouth.saying)) { trace("ignored (its own voice)", text); return; }
-      mouth.silence();   // you talked over it, so it stops and takes this down
+      mouth.silence();   // you talked over it, so it stops and listens
     }
 
-    heardEl.textContent = "";
-
-    for (const step of readAsInstructions(text, setup.openPhrase, setup.closePhrase)) {
-      if (step.open) { openGate(); continue; }
-      if (step.close) { closeGate(); continue; }
-      if (!open) { trace("ignored (gate shut)", step.say); nearMiss(step.say); continue; }
-
-      collected.push(step.say);
-      heardEl.textContent = collected.join(" ");
+    for (const step of reader.feed(text)) {
+      if (step.open) { wipe(); continue; }
+      if (step.close) { send(); continue; }
+      question.push(step.say);
       trace("keeping", step.say);
-      stillThere();
-      paint();
     }
-  }
 
-  // Said the name, but the phrase did not land — the single most useful thing to
-  // know when it will not open, and invisible from the driver's seat. It reports
-  // what it thought it heard, so the phrase can be moved to words it hears reliably.
-  function nearMiss(text) {
-    const name = plainWords(setup.openPhrase)[0];
-    const words = plainWords(text);
-    const at = words.findIndex((word) => nearlySame(word, name));
-    if (at === -1) return;
-    trace("HEARD THE NAME BUT NOT THE PHRASE", `"${words.slice(at, at + 3).join(" ")}"`);
+    show();
+    if (!mouth?.busy) idleState();
   }
 
   function fromClaude(kind, text) {
@@ -750,21 +777,11 @@ function splitFrontEnd() {
 
       ears = deviceEars({
         onHeard: heard,
-        onHearing: (text) => {
-          if (!open) { heardEl.textContent = text; return; }
-          heardEl.textContent = `${collected.join(" ")} ${text}`.trim();
-          stillThere();
-        },
-        // Waiting until you have finished a sentence to react is taking turns, not
-        // being interrupted. So the opening phrase is acted on the instant it is
-        // half-heard — unless what was heard is mostly the answer it is in the middle
-        // of reading, which is its own voice off the windscreen and not you.
+        onHearing: (text) => { live = text; show(); },
+        // Talking over it has to stop it straight away rather than at the end of
+        // your sentence, so this acts on words it has not finished hearing.
         onPartialPhrase: (text) => {
-          if (open) return;
-          if (mouth?.busy && soundsLikeItself(text, mouth.saying)) return;
-          if (readAsInstructions(text, setup.openPhrase, setup.closePhrase).some((s) => s.open)) {
-            openGate();
-          }
+          if (mouth?.busy && !soundsLikeItself(text, mouth.saying)) mouth.silence();
         },
         onTrouble: (message) => log(message, "bad"),
       });
@@ -773,35 +790,27 @@ function splitFrontEnd() {
       listenForResults(fromClaude);
       ears.start();
       goBtn.disabled = false;
-      open = always;   // no gate means it is listening from the moment you start
+      show();
       idleState();
-      log(
-        always
-          ? `ready — just talk. It sends when you stop for a few seconds.`
-          : `ready — say "${setup.openPhrase}", ask, then say "${setup.closePhrase}". A pause never sends.`,
-        "work",
-      );
-      trace("session started", always ? "no gate" : "phrase gate");
+      log(`ready — talk. Nothing is sent until you say "${setup.closePhrase}".`, "work");
+      trace("session started");
     },
     stop() {
       ears?.stop(); ears = null;
       mouth?.silence();
       results?.close(); results = null;
       stopWork();
-      clearTimeout(forgetTimer);
-      open = false;
-      collected = [];
       working = false;
-      heardEl.textContent = "";
+      question = [];
+      live = "";
+      promptEl.textContent = "";
     },
-    // The same three things the phrases do, for when dictation is having a bad day
-    // or the road is too loud to be heard over.
+    // The same thing the closing phrase does, for when the road is too loud to be
+    // heard over. Never needed, always there.
     tap() {
       if (mouth?.busy) { mouth.silence(); trace("tapped: quiet"); return; }
-      if (collected.length) { trace("tapped: send now"); closeGate(); return; }
-      if (open) { trace("tapped: nothing to send yet"); return; }
-      trace("tapped: open");
-      openGate();
+      trace("tapped: send");
+      send();
     },
   };
 }

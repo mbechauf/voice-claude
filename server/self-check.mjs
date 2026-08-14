@@ -66,17 +66,49 @@ function checkItKnowsItsOwnVoice() {
 // part of the page that reads speech into instructions is lifted out and run here.
 function checkTheGate() {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
-  const pieces = ["function howItSounds", "function nearlySame", "function phraseStartsAt", "const plainWords", "function readAsInstructions"]
+  const pieces = ["function howItSounds", "function nearlySame", "function phraseStartsAt", "const plainWords", "function makePhraseReader", "function readAsInstructions"]
     .map((start) => page.match(new RegExp(`${start}[\\s\\S]*?\\n}`)))
     .filter(Boolean)
     .map((m) => m[0]);
 
-  if (pieces.length !== 5) {
-    check("the page can be read for the gate", false, `found ${pieces.length} of 5 parts`);
+  if (pieces.length !== 6) {
+    check("the page can be read for the gate", false, `found ${pieces.length} of 6 parts`);
     return;
   }
 
   const read = new Function(`${pieces.join("\n")}; return readAsInstructions;`)();
+  const makeReader = new Function(`${pieces.join("\n")}; return makePhraseReader;`)();
+
+  // The phone hands over whatever it had when you paused, so a phrase said with a
+  // pause in the middle of it arrives in two pieces. This is what was quietly
+  // breaking it: the words fell through and became part of the question instead.
+  const overPieces = (chunks) => {
+    const reader = makeReader("claude go", "claude stop");
+    const out = [];
+    for (const chunk of chunks) {
+      for (const step of reader.feed(chunk)) {
+        out.push(step.open ? "OPEN" : step.close ? "CLOSE" : step.say);
+      }
+    }
+    if (reader.held()) out.push(reader.held());
+    return out.join(" | ");
+  };
+
+  const split = [
+    ["the name and the word arriving separately", ["claude", "stop"], "CLOSE"],
+    ["a question then a split closing phrase", ["check the tests", "claude", "stop"], "check the tests | CLOSE"],
+    ["a split opening phrase", ["claude", "go"], "OPEN"],
+    ["the name alone is still just a word", ["claude", "found three things"], "claude found three things"],
+    ["a whole exchange in pieces", ["claude go", "review the last change", "and the tests", "claude", "stop"], "OPEN | review the last change | and the tests | CLOSE"],
+    ["go misheard as girl", ["claude girl"], "OPEN"],
+    ["stop misheard as stopped", ["claude stopped"], "CLOSE"],
+    ["the name last, still waiting", ["tell me about claude"], "tell me about | claude"],
+  ];
+
+  for (const [name, chunks, expected] of split) {
+    const got = overPieces(chunks);
+    check(`across pieces: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+  }
   const shape = (text) =>
     read(text, "claude go", "claude stop")
       .map((step) => (step.open ? "OPEN" : step.close ? "CLOSE" : step.say))
