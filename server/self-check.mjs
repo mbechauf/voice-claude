@@ -79,17 +79,17 @@ function checkTheGate() {
   const read = new Function(`${pieces.join("\n")}; return readAsInstructions;`)();
   const makeReader = new Function(`${pieces.join("\n")}; return makePhraseReader;`)();
 
+  const NAMED = { open: "claude go", close: "claude stop" };
+  const label = (step) => (step.command ? step.command.toUpperCase() : step.say);
+  const shape = (text) => read(text, NAMED).map(label).join(" | ");
+
   // The phone hands over whatever it had when you paused, so a phrase said with a
   // pause in the middle of it arrives in two pieces. This is what was quietly
   // breaking it: the words fell through and became part of the question instead.
-  const overPieces = (chunks) => {
-    const reader = makeReader("claude go", "claude stop");
+  const overPieces = (chunks, phrases = NAMED) => {
+    const reader = makeReader(phrases);
     const out = [];
-    for (const chunk of chunks) {
-      for (const step of reader.feed(chunk)) {
-        out.push(step.open ? "OPEN" : step.close ? "CLOSE" : step.say);
-      }
-    }
+    for (const chunk of chunks) for (const step of reader.feed(chunk)) out.push(label(step));
     if (reader.held()) out.push(reader.held());
     return out.join(" | ");
   };
@@ -112,17 +112,8 @@ function checkTheGate() {
 
   // The phrases actually in use. A phrase is only worth having if it survives being
   // said normally, arrives in pieces, and never fires inside an ordinary question.
-  const withRealPhrases = (chunks, open = "scratch that", close = "all done") => {
-    const reader = makeReader(open, close);
-    const out = [];
-    for (const chunk of chunks) {
-      for (const step of reader.feed(chunk)) {
-        out.push(step.open ? "WIPE" : step.close ? "SEND" : step.say);
-      }
-    }
-    if (reader.held()) out.push(reader.held());
-    return out.join(" | ");
-  };
+  const REAL = { send: "all done", wipe: "scratch that", read: "read prompt" };
+  const withRealPhrases = (chunks) => overPieces(chunks, REAL);
 
   const real = [
     ["sending", ["what changed in the last commit", "all done"], "what changed in the last commit | SEND"],
@@ -132,17 +123,16 @@ function checkTheGate() {
     ["a question containing all", ["are all the tests passing"], "are all the tests passing"],
     ["a question containing done", ["is the migration done yet"], "is the migration done yet"],
     ["and containing both, apart", ["are all the migrations done"], "are all the migrations done"],
+    ["hearing it back", ["what changed lately", "read prompt"], "what changed lately | READ"],
+    ["hearing it back in pieces", ["read", "prompt"], "READ"],
+    ["a question about reading is not the command", ["can it read the prompt file"], "can it read the prompt file"],
+    ["asking it to read something else", ["read the tests"], "read the tests"],
   ];
 
   for (const [name, chunks, expected] of real) {
     const got = withRealPhrases(chunks);
     check(`the real phrases: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
   }
-  const shape = (text) =>
-    read(text, "claude go", "claude stop")
-      .map((step) => (step.open ? "OPEN" : step.close ? "CLOSE" : step.say))
-      .join(" | ");
-
   const cases = [
     ["a whole question in one breath", "claude go review the last change claude stop", "OPEN | review the last change | CLOSE"],
     ["a question said over three goes", "claude go", "OPEN"],
@@ -239,7 +229,12 @@ try {
 
   check("the banner says plainly that nothing is billed", banner.includes("nothing beyond the Claude subscription"));
 
-  check("tells the phone the phrases that open and close the gate", Boolean(setup.openPhrase && setup.closePhrase), `${setup.openPhrase} / ${setup.closePhrase}`);
+  const spoken = Object.entries(setup.phrases ?? {});
+  check(
+    "tells the phone what it can be told to do",
+    spoken.length >= 3 && spoken.every(([, phrase]) => phrase.trim().split(/\s+/).length >= 2),
+    spoken.map(([name, phrase]) => `${name}: "${phrase}"`).join(", "),
+  );
 
   checkItKnowsItsOwnVoice();
   checkTheGate();

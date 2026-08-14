@@ -534,12 +534,18 @@ const plainWords = (text) =>
  * across every piece, and when the words at the end could still turn into a phrase
  * once you finish saying it, it holds them back rather than committing them.
  *
- * Gives back {open} / {say: "..."} / {close} in the order they were spoken, so a
+ * Gives back {command: "send"} / {say: "..."} in the order they were spoken, so a
  * whole question said in one breath behaves exactly like one said over three.
+ *
+ * It takes however many commands you give it — {send: "all done", ...} — because
+ * there was never anything special about there being two of them.
  */
-function makePhraseReader(openPhrase, closePhrase) {
-  const open = plainWords(openPhrase);
-  const close = plainWords(closePhrase);
+function makePhraseReader(phrases) {
+  // Longest first, so that when one phrase begins like another the longer reading
+  // wins rather than the shorter one swallowing its first words.
+  const commands = Object.entries(phrases)
+    .map(([name, phrase]) => ({ name, words: plainWords(phrase) }))
+    .sort((a, b) => b.words.length - a.words.length);
   let pending = [];
 
   // Could these last few words still become the phrase, once more words arrive?
@@ -563,22 +569,19 @@ function makePhraseReader(openPhrase, closePhrase) {
 
       let i = 0;
       while (i < pending.length) {
-        // The closing phrase is checked first: when one phrase begins like the other
-        // — as "claude go" and "claude stop" do — the longer reading is meant.
-        if (phraseStartsAt(pending, i, close)) {
+        const said = commands.find((c) => phraseStartsAt(pending, i, c.words));
+        if (said) {
           flush();
-          steps.push({ close: true });
-          i += close.length;
-        } else if (phraseStartsAt(pending, i, open)) {
-          flush();
-          steps.push({ open: true });
-          i += open.length;
-        } else if (mightBecome(pending, i, open) || mightBecome(pending, i, close)) {
-          break; // hold these; the rest of the phrase may be on its way
-        } else {
-          spoken.push(pending[i]);
-          i += 1;
+          steps.push({ command: said.name });
+          i += said.words.length;
+          continue;
         }
+        // The rest of a phrase may still be on its way, so hold these back rather
+        // than letting them fall through into the question.
+        if (commands.some((c) => mightBecome(pending, i, c.words))) break;
+
+        spoken.push(pending[i]);
+        i += 1;
       }
 
       flush();
@@ -591,8 +594,8 @@ function makePhraseReader(openPhrase, closePhrase) {
 }
 
 // One piece of speech on its own, for when there is no stream to keep.
-function readAsInstructions(text, openPhrase, closePhrase) {
-  const reader = makePhraseReader(openPhrase, closePhrase);
+function readAsInstructions(text, phrases) {
+  const reader = makePhraseReader(phrases);
   const steps = reader.feed(text);
   const held = reader.held();
   if (held) steps.push({ say: held });
@@ -653,7 +656,7 @@ function splitFrontEnd() {
   // One running transcript of everything you have said since the last question went
   // off. It is always being written to, it is always on the screen, and nothing
   // removes anything from it except sending it. A pause is a person thinking.
-  const reader = makePhraseReader(setup.openPhrase, setup.closePhrase);
+  const reader = makePhraseReader(setup.phrases);
   let question = [];
   let live = "";        // the words being said right this second, not settled yet
   let working = false;
@@ -682,8 +685,8 @@ function splitFrontEnd() {
     if (working) { setState("working — talk whenever you like"); return; }
     setState(
       question.length
-        ? `say "${setup.closePhrase}" to send it. No hurry.`
-        : `listening — say "${setup.openPhrase}" to wipe it and start again`,
+        ? `say "${setup.phrases.send}" to send it. No hurry.`
+        : `listening — nothing recorded yet`,
     );
   }
 
@@ -728,7 +731,24 @@ function splitFrontEnd() {
     mouth?.silence();      // saying it is also how you cut it off
     beep("open");
     show();
-    setState("starting the question again — go ahead");
+    setState("wiped — start again whenever you like");
+  }
+
+  // Everything you can say that is an instruction rather than part of the question.
+  // Adding one is a line here and a line in the settings on the Mac.
+  function obey(command) {
+    trace("COMMAND", command);
+    if (command === "send") return send();
+    if (command === "wipe") return wipe();
+    if (command === "read") return readBack();
+  }
+
+  // Says back what it has so far. Its own voice is filtered out of what it hears,
+  // so reading the question aloud cannot end up recorded as part of the question.
+  function readBack() {
+    const soFar = question.join(" ").trim();
+    mouth?.silence();
+    mouth?.speak(soFar ? `You have: ${soFar}` : "Nothing recorded yet.");
   }
 
   function heard(text) {
@@ -742,8 +762,7 @@ function splitFrontEnd() {
     }
 
     for (const step of reader.feed(text)) {
-      if (step.open) { wipe(); continue; }
-      if (step.close) { send(); continue; }
+      if (step.command) { obey(step.command); continue; }
       question.push(step.say);
       trace("keeping", step.say);
     }
@@ -793,7 +812,11 @@ function splitFrontEnd() {
       goBtn.disabled = false;
       show();
       idleState();
-      log(`ready — talk. Nothing is sent until you say "${setup.closePhrase}".`, "work");
+      log(
+        `ready — talk. Say "${setup.phrases.send}" to send, ` +
+        `"${setup.phrases.read}" to hear it back, "${setup.phrases.wipe}" to start again.`,
+        "work",
+      );
       trace("session started");
     },
     stop() {

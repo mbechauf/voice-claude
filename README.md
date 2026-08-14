@@ -45,9 +45,12 @@ back to the phone's own rather than leaving you with silence in a car.
 Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
 so Safari warns the first time; accept it and it stays accepted.
 
-Then talk. Everything you say builds up in one box on the screen, in full, and stays there. When the
-question is finished, say **"all done"** and it goes. Say **"scratch that"** to wipe it and start the
-question again.
+Then talk. Everything you say builds up in one box on the screen, in full, and stays there. Three
+things you can say are instructions rather than part of the question:
+
+- **"all done"** — that is the question, send it
+- **"read prompt"** — say back what has been recorded so far, for when you cannot look
+- **"scratch that"** — throw it away and start the question again
 
 Nothing else does anything. There is no clock: a pause is a person thinking, not a person finished,
 so no length of silence ever sends a question or throws one away. That was the whole failure of the
@@ -94,11 +97,13 @@ pocket, screen off"—see issue #2. Real drives with the screen on come first an
 ### Changing the phrases
 
 ```bash
-VOICE_CLAUDE_OPEN="wipe that" VOICE_CLAUDE_CLOSE="over to you" npm start
+VOICE_CLAUDE_CLOSE="over to you" VOICE_CLAUDE_OPEN="wipe that" VOICE_CLAUDE_READ="say it back" npm start
 ```
 
 Two or more words each, made of words dictation meets every day. A single word fires by accident all
-day long, and a rare or invented word never gets transcribed as itself.
+day long, and a rare or invented word never gets transcribed as itself. There is nothing special
+about there being three of them—they are a list in `server/config.mjs`, and adding another is a line
+there and a line in the page.
 
 ### Changing the voice
 

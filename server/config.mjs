@@ -52,16 +52,22 @@ export const SPEAKER_RATE = Number(process.env.VOICE_CLAUDE_SPEAKER_RATE ?? 1.05
 //               Only sane somewhere quiet with nobody else talking.
 export const GATE = process.env.VOICE_CLAUDE_GATE ?? "phrases";
 
-// Deliberately not a name. A phone's dictation is trained on ordinary speech, so a
+// The things you can say that are instructions rather than part of the question.
+//
+// Deliberately not names. A phone's dictation is trained on ordinary speech, so a
 // proper noun it has never met comes back as whatever ordinary word sounds nearest —
 // "Claude" arrived as cloud, clod, cold, clawed, and "Claude go" as "Claude girl".
 // These are plain words it cannot get wrong, in an order nobody says by accident,
-// and neither of them turns up inside a question about code.
+// and none of them turns up inside a question about code.
 //
-//   "scratch that" — throw away the question so far and start it again
-//   "all done"     — that is the question, send it
-export const OPEN_PHRASE = process.env.VOICE_CLAUDE_OPEN ?? "scratch that";
-export const CLOSE_PHRASE = process.env.VOICE_CLAUDE_CLOSE ?? "all done";
+// Adding another is one line here and one line in the page. Two or more everyday
+// words each: one word fires by accident all day, and an invented word never gets
+// transcribed as itself.
+export const PHRASES = {
+  send: process.env.VOICE_CLAUDE_CLOSE ?? "all done",       // that is the question — go
+  wipe: process.env.VOICE_CLAUDE_OPEN ?? "scratch that",    // throw it away, start again
+  read: process.env.VOICE_CLAUDE_READ ?? "read prompt",     // say back what you have so far
+};
 
 // Only used when there is no gate. How long a silence means you have finished.
 export const PAUSE_MS = Number(process.env.VOICE_CLAUDE_PAUSE ?? 3_500);
