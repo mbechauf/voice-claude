@@ -45,22 +45,24 @@ export const SPEAKER_RATE = Number(process.env.VOICE_CLAUDE_SPEAKER_RATE ?? 1.05
 
 // How it decides that something was meant for it.
 //
-//   "always" — everything you say is the question, sent once you stop talking. No
-//              ceremony at all. What you want in a car alone.
-//   "phrases" — nothing counts unless it is said between the two phrases below.
-//              Worth it only if something else in the car keeps setting it off.
-export const GATE = process.env.VOICE_CLAUDE_GATE ?? "always";
-
-// How long a silence means you have finished. Long enough to think mid-sentence,
-// short enough that you are not left wondering whether it heard you.
-export const PAUSE_MS = Number(process.env.VOICE_CLAUDE_PAUSE ?? 3_500);
+//   "phrases" — nothing counts unless it is said between the two phrases below, and
+//               a silence never sends anything. You decide when a question is
+//               finished, because a pause in a car means you are thinking, not done.
+//   "always"  — everything you say is the question, sent once you stop talking.
+//               Only sane somewhere quiet with nobody else talking.
+export const GATE = process.env.VOICE_CLAUDE_GATE ?? "phrases";
 
 export const OPEN_PHRASE = process.env.VOICE_CLAUDE_OPEN ?? "claude go";
 export const CLOSE_PHRASE = process.env.VOICE_CLAUDE_CLOSE ?? "claude stop";
 
-// In the phrase gate, how long it waits before giving up on a question you started
-// and then forgot about. Silence, not a pause for thought.
-export const OPEN_TIMEOUT_MS = Number(process.env.VOICE_CLAUDE_OPEN_TIMEOUT ?? 30_000);
+// Only used when there is no gate. How long a silence means you have finished.
+export const PAUSE_MS = Number(process.env.VOICE_CLAUDE_PAUSE ?? 3_500);
+
+// How long the gate waits before giving up on a question you started and forgot
+// about. Zero means never, which is the default: nothing you did not finish
+// yourself is ever sent, and nothing you were still thinking about is ever thrown
+// away. Set it to a number of milliseconds if you would rather it tidied up.
+export const OPEN_TIMEOUT_MS = Number(process.env.VOICE_CLAUDE_OPEN_TIMEOUT ?? 0);
 
 // Realtime mode only. The small model is ~1/3 the price and is only ever a
 // mouthpiece — it never reasons about your code — so the quality trade is close

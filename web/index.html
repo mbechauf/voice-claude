@@ -628,20 +628,17 @@ function splitFrontEnd() {
     if (always) {
       setState(working ? "working — talk over it whenever you like" : "listening — just talk");
     } else {
-      setState(
-        working
-          ? `working — say "${setup.openPhrase}" or tap to butt in`
-          : `not recording — say "${setup.openPhrase}" or tap the button`,
-      );
+      setState(`not recording — say "${setup.openPhrase}"`);
     }
     paint();
   }
 
-  // Any word at all, even one it has not finished hearing, means you are still in the
-  // middle of asking. Silence is the only thing that means you are done.
+  // A pause is a person thinking, not a person finished. With the gate on, nothing
+  // is ever sent by a clock — it waits for you to say so, however long that takes.
   function stillThere() {
     clearTimeout(forgetTimer);
-    forgetTimer = setTimeout(closeGate, always ? (setup.pause ?? 3_500) : (setup.openTimeout ?? 30_000));
+    const giveUpAfter = always ? (setup.pause ?? 3_500) : (setup.openTimeout ?? 0);
+    if (giveUpAfter > 0) forgetTimer = setTimeout(closeGate, giveUpAfter);
   }
 
   function openGate() {
@@ -651,7 +648,7 @@ function splitFrontEnd() {
     mouth?.silence();       // opening the gate is also how you cut it off
     beep("open");
     heardEl.textContent = "";
-    setState(`recording — say "${setup.closePhrase}" or tap when you're done`);
+    setState(`recording — say "${setup.closePhrase}" when you're done. No hurry.`);
     paint();
     stillThere();
     trace("GATE OPEN");
@@ -706,7 +703,7 @@ function splitFrontEnd() {
     for (const step of readAsInstructions(text, setup.openPhrase, setup.closePhrase)) {
       if (step.open) { openGate(); continue; }
       if (step.close) { closeGate(); continue; }
-      if (!open) { trace("ignored (gate shut)", step.say); continue; }
+      if (!open) { trace("ignored (gate shut)", step.say); nearMiss(step.say); continue; }
 
       collected.push(step.say);
       heardEl.textContent = collected.join(" ");
@@ -714,6 +711,17 @@ function splitFrontEnd() {
       stillThere();
       paint();
     }
+  }
+
+  // Said the name, but the phrase did not land — the single most useful thing to
+  // know when it will not open, and invisible from the driver's seat. It reports
+  // what it thought it heard, so the phrase can be moved to words it hears reliably.
+  function nearMiss(text) {
+    const name = plainWords(setup.openPhrase)[0];
+    const words = plainWords(text);
+    const at = words.findIndex((word) => nearlySame(word, name));
+    if (at === -1) return;
+    trace("HEARD THE NAME BUT NOT THE PHRASE", `"${words.slice(at, at + 3).join(" ")}"`);
   }
 
   function fromClaude(kind, text) {
@@ -770,7 +778,7 @@ function splitFrontEnd() {
       log(
         always
           ? `ready — just talk. It sends when you stop for a few seconds.`
-          : `ready — say "${setup.openPhrase}" or tap the button, ask, then say "${setup.closePhrase}"`,
+          : `ready — say "${setup.openPhrase}", ask, then say "${setup.closePhrase}". A pause never sends.`,
         "work",
       );
       trace("session started", always ? "no gate" : "phrase gate");
