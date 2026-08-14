@@ -10,6 +10,12 @@ function describeTool(name) {
   switch (name) {
     case "Read":
       return "reading the code";
+    case "Edit":
+    case "Write":
+      // Deliberately not the file name, and deliberately not what changed. Hearing
+      // the same path read out twenty times tells you nothing you did not know, and
+      // what it actually did belongs in the answer at the end.
+      return "changing the code";
     case "Grep":
     case "Glob":
       return "searching through the project";

@@ -48,10 +48,21 @@ so Safari warns the first time; accept it and it stays accepted.
 Then talk. Everything you say builds up in one box on the screen, in full, and stays there. Three
 things you can say are instructions rather than part of the question:
 
-- **"all done"** — that is the question, send it
-- **"read prompt"** — read back what has been recorded so far, for when you cannot look
-- **"take that back"** — drop the last thing you said and keep the rest
-- **"scratch that"** — throw it all away and start the question again
+- **"all done"** — that is the question, send it. Also "that's it", "over to you", "off you go".
+- **"read prompt"** — read back what has been recorded so far, for when you cannot look. Also "read
+  it back", "read that back", "say it back", and "rep prompt", which is what dictation makes of it.
+- **"take that back"** — drop the last thing you said, keep the rest. Also "delete last".
+- **"scratch that"** — throw the whole question away and start it again. Also "start again".
+- **"fresh start"** — forget the whole drive, not just this question.
+
+Several wordings each, because you will not remember one exact phrase while driving and dictation
+mishears. The cost of a wording is that it can no longer appear inside a question, so they are kept
+to things nobody says while describing code—"read the prompt" is deliberately not one of them,
+because "can it read the prompt file" is a real question.
+
+You also hear where things are without looking: two rising blips when a question has gone, a quiet
+low note every fifteen seconds while Claude is still working, and a falling note when an answer is
+about to be read.
 
 Nothing else does anything. There is no clock: a pause is a person thinking, not a person finished,
 so no length of silence ever sends a question or throws one away. That was the whole failure of the
@@ -210,7 +221,17 @@ Mac works, and the server prints every address it can be reached on, including t
 the page to the public internet: it has no password, and anyone who found it could read your code
 through Claude.
 
-## Safety default
+## What it is allowed to do
 
-Claude is read-only by default through `ALLOWED_TOOLS` in `server/config.mjs`. A session that stalls
-for approval is not useful while driving, so widen that list deliberately, not by accident.
+Claude cannot stop to ask permission—you are driving—so the list in `server/config.mjs` is the only
+thing standing between it and your files.
+
+It may read, search, and **change** files. That was enabled deliberately. Be clear-eyed about what
+it means: work happens while you cannot see it, cannot read a diff, and cannot stop it halfway. What
+protects you is not the list any more but version control—everything it does shows up as changes you
+can read and undo when you get out of the car. It may not commit, push, or run anything destructive,
+so nothing done while you drive is hard to reverse.
+
+Claude is also told not to read files or its own changes aloud, and to describe what a change now
+does differently rather than what it wrote. Hearing a path recited at seventy miles an hour is
+worthless, and hearing the same file described five times is worse than silence.

@@ -63,11 +63,31 @@ export const GATE = process.env.VOICE_CLAUDE_GATE ?? "phrases";
 // Adding another is one line here and one line in the page. Two or more everyday
 // words each: one word fires by accident all day, and an invented word never gets
 // transcribed as itself.
+// Each has several wordings, for two reasons. You will not remember one exact
+// phrase while driving, and dictation mishears — "read prompt" comes back as "rep
+// prompt" often enough to matter. Any of them does the same thing, so the one that
+// comes to mind is the right one.
+//
+// Add to these freely. The cost of another wording is that it can no longer appear
+// inside a question, so keep them to things nobody says while describing code.
 export const PHRASES = {
-  send: process.env.VOICE_CLAUDE_CLOSE ?? "all done",       // that is the question — go
-  wipe: process.env.VOICE_CLAUDE_OPEN ?? "scratch that",    // throw it all away, start again
-  read: process.env.VOICE_CLAUDE_READ ?? "read prompt",     // say back what you have so far
-  undo: process.env.VOICE_CLAUDE_UNDO ?? "take that back",  // drop the last thing said
+  // That is the question — go.
+  send: ["all done", "that's it", "over to you", "off you go"],
+
+  // Read back what has been recorded so far.
+  // "read the prompt" is deliberately absent: "can it read the prompt file" is a
+  // real question about this project, and a wording that can appear inside a
+  // question is worse than one fewer way of saying it.
+  read: ["read prompt", "read it back", "read that back", "read back", "say it back", "rep prompt"],
+
+  // Drop the last thing said, keep the rest.
+  undo: ["take that back", "delete last", "delete the last", "scratch last"],
+
+  // Throw the whole question away and start it again.
+  wipe: ["scratch that", "start again", "wipe that"],
+
+  // Forget the whole drive, not just this question.
+  forget: ["fresh start", "forget everything"],
 };
 
 // Only used when there is no gate. How long a silence means you have finished.
@@ -85,13 +105,20 @@ export const OPEN_TIMEOUT_MS = Number(process.env.VOICE_CLAUDE_OPEN_TIMEOUT ?? 0
 export const VOICE_MODEL = process.env.VOICE_CLAUDE_MODEL ?? "gpt-realtime-2.1-mini";
 export const VOICE_NAME = process.env.VOICE_CLAUDE_VOICE ?? "marin";
 
-// Read-only by default. A session that stops to ask permission is useless while
-// driving, so Claude is told never to ask — which makes it important that it can
-// only do harmless things. Widen this deliberately.
+// Claude cannot stop to ask permission — you are driving — so this list is the only
+// thing standing between it and your files, and it is deliberately explicit.
+//
+// It may now write. That was asked for knowingly, and it is worth being clear about
+// what it means: work happens while you cannot see it. What protects you is not
+// this list any more but version control — everything it does shows up as changes
+// you can read and undo when you get out of the car. It may not commit, push, or
+// run anything destructive, so nothing it does while you drive is hard to reverse.
 export const ALLOWED_TOOLS = [
   "Read",
   "Grep",
   "Glob",
+  "Edit",
+  "Write",
   "Bash(git status:*)",
   "Bash(git diff:*)",
   "Bash(git log:*)",

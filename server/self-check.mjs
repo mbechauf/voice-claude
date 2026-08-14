@@ -112,7 +112,13 @@ function checkTheGate() {
 
   // The phrases actually in use. A phrase is only worth having if it survives being
   // said normally, arrives in pieces, and never fires inside an ordinary question.
-  const REAL = { send: "all done", wipe: "scratch that", read: "read prompt", undo: "take that back" };
+  const REAL = {
+    send: ["all done", "that's it", "over to you", "off you go"],
+    read: ["read prompt", "read it back", "read that back", "read back", "say it back", "rep prompt"],
+    undo: ["take that back", "delete last", "delete the last", "scratch last"],
+    wipe: ["scratch that", "start again", "wipe that"],
+    forget: ["fresh start", "forget everything"],
+  };
   const withRealPhrases = (chunks) => overPieces(chunks, REAL);
 
   const real = [
@@ -131,6 +137,14 @@ function checkTheGate() {
     ["taking it back in pieces", ["take that", "back"], "UNDO"],
     ["a question about taking things back is not the command", ["can you roll that back for me"], "can you roll that back for me"],
     ["a question mentioning back", ["put the old version back"], "put the old version back"],
+    ["another way of saying send", ["check the tests", "that's it"], "check the tests | SEND"],
+    ["and another", ["check the tests", "over to you"], "check the tests | SEND"],
+    ["read misheard as rep", ["rep prompt"], "READ"],
+    ["another way of asking to hear it", ["say it back"], "READ"],
+    ["another way of taking one back", ["delete last"], "UNDO"],
+    ["forgetting the whole drive", ["fresh start"], "FORGET"],
+    ["a question about starting things", ["how do i start the server"], "how do i start the server"],
+    ["a question about deleting a file", ["delete the old migration file"], "delete the old migration file"],
   ];
 
   for (const [name, chunks, expected] of real) {
@@ -233,11 +247,18 @@ try {
 
   check("the banner says plainly that nothing is billed", banner.includes("nothing beyond the Claude subscription"));
 
-  const spoken = Object.entries(setup.phrases ?? {});
+  const spoken = Object.entries(setup.phrases ?? {}).map(([name, said]) => [name, [said].flat()]);
+  const everyWording = spoken.flatMap(([, wordings]) => wordings);
   check(
     "tells the phone what it can be told to do",
-    spoken.length >= 3 && spoken.every(([, phrase]) => phrase.trim().split(/\s+/).length >= 2),
-    spoken.map(([name, phrase]) => `${name}: "${phrase}"`).join(", "),
+    spoken.length >= 4 && everyWording.length > 0,
+    spoken.map(([name, wordings]) => `${name} (${wordings.length})`).join(", "),
+  );
+  // One word fires by accident all day long.
+  check(
+    "every wording is at least two words",
+    everyWording.every((phrase) => phrase.trim().split(/\s+/).length >= 2),
+    everyWording.filter((phrase) => phrase.trim().split(/\s+/).length < 2).join(", ") || "all fine",
   );
 
   checkItKnowsItsOwnVoice();

@@ -534,10 +534,12 @@ const plainWords = (text) =>
  * there was never anything special about there being two of them.
  */
 function makePhraseReader(phrases) {
-  // Longest first, so that when one phrase begins like another the longer reading
+  // Each command may have several wordings; any of them means the same thing.
+  // Longest first, so that when one wording begins like another the longer reading
   // wins rather than the shorter one swallowing its first words.
   const commands = Object.entries(phrases)
-    .map(([name, phrase]) => ({ name, words: plainWords(phrase) }))
+    .flatMap(([name, said]) =>
+      (Array.isArray(said) ? said : [said]).map((phrase) => ({ name, words: plainWords(phrase) })))
     .sort((a, b) => b.words.length - a.words.length);
   let pending = [];
 
@@ -604,6 +606,71 @@ function readAsInstructions(text, phrases) {
 // driver's seat. So exactly one channel is opened by the Start button, and both the
 // notes and the voice go down it.
 
+// The notes, built as real sounds so they can go out the same way the voice does.
+// A phone will not play something it was not asked for by a tap, and it silences
+// anything it thinks is decoration — so these are made here rather than synthesised
+// on the channel that the mute switch turns off.
+const RATE = 8000;
+
+function wavFromSamples(samples) {
+  const bytes = new Uint8Array(44 + samples.length);
+  const view = new DataView(bytes.buffer);
+  const ascii = (at, text) => [...text].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + samples.length, true);
+  ascii(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);          // plain, uncompressed
+  view.setUint16(22, 1, true);          // one channel
+  view.setUint32(24, RATE, true);
+  view.setUint32(28, RATE, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);          // eight bits is plenty for a blip
+  ascii(36, "data");
+  view.setUint32(40, samples.length, true);
+  bytes.set(samples, 44);
+
+  let text = "";
+  for (const byte of bytes) text += String.fromCharCode(byte);
+  return `data:audio/wav;base64,${btoa(text)}`;
+}
+
+// One blip: a tone sliding from one pitch to another, faded in and out so it does
+// not click. A click in a headset at seventy miles an hour is startling.
+function blip(from, to, ms, loudness = 0.35) {
+  const count = Math.round((RATE * ms) / 1000);
+  const samples = new Uint8Array(count);
+  let phase = 0;
+  for (let i = 0; i < count; i += 1) {
+    const along = i / count;
+    const pitch = from + (to - from) * along;
+    phase += (2 * Math.PI * pitch) / RATE;
+    const fade = Math.min(1, along * 12, (1 - along) * 12);
+    samples[i] = 128 + Math.round(Math.sin(phase) * 127 * loudness * fade);
+  }
+  return samples;
+}
+
+function silenceFor(ms) {
+  return new Uint8Array(Math.round((RATE * ms) / 1000)).fill(128);
+}
+
+const NOTES = {};
+function toneFor(which, shape) {
+  if (NOTES[which]) return NOTES[which];
+  const pieces = [];
+  shape.forEach(([from, to], i) => {
+    if (i) pieces.push(silenceFor(40));
+    pieces.push(blip(from, to, which === "working" ? 90 : 130, which === "working" ? 0.18 : 0.35));
+  });
+  const total = pieces.reduce((n, piece) => n + piece.length, 0);
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const piece of pieces) { all.set(piece, at); at += piece.length; }
+  NOTES[which] = wavFromSamples(all);
+  return NOTES[which];
+}
+
 // A tenth of a second of real silence. Used once, from the tap, to open the media
 // channel — an empty or malformed sound gets refused and the channel stays shut.
 const OPENING_SOUND =
@@ -612,6 +679,7 @@ const OPENING_SOUND =
 const sound = {
   channel: null,   // the notes
   player: null,    // the voice
+  notes: null,     // the little sounds
   finish: null,    // how to end the sentence being played, if it is cut off
 
   // Called from the tap itself, never later.
@@ -650,6 +718,12 @@ const sound = {
         () => trace("media channel", "open"),
         (err) => trace("media channel refused", err.message ?? err),
       );
+
+      // The notes get their own, so that a note never cuts a sentence in half.
+      this.notes ??= new Audio();
+      this.notes.preload = "auto";
+      this.notes.src = OPENING_SOUND;
+      this.notes.play().catch(() => {});
     } catch (err) {
       trace("media channel refused", err.message ?? err);
     }
@@ -657,25 +731,21 @@ const sound = {
 
   get awake() { return Boolean(this.player); },
 
-  // Two short notes: rising when something was thrown away, falling when a question
-  // has gone. Quicker than a spoken "yes?" and never mistaken for part of an answer.
-  beep(which) {
-    if (!this.channel) return;
+  // The notes. They are built here as real sounds rather than played through the
+  // other channel, so that they go out the same way the voice does — the way the
+  // mute switch leaves alone. A note you cannot hear is worse than no note.
+  note(which) {
+    const shapes = {
+      sent: [[520, 780], [780, 990]],   // gone: two rising blips
+      ready: [[880, 660]],              // an answer is about to be read
+      working: [[300, 300]],            // still going, quietly
+      wiped: [[700, 380]],              // that has been thrown away
+    };
+    const shape = shapes[which];
+    if (!shape || !this.notes) return;
     try {
-      const now = this.channel.currentTime;
-      const [from, to] = which === "open" ? [520, 780] : [700, 440];
-      const tone = this.channel.createOscillator();
-      const level = this.channel.createGain();
-      tone.type = "sine";
-      tone.frequency.setValueAtTime(from, now);
-      tone.frequency.exponentialRampToValueAtTime(to, now + 0.12);
-      // Fade in and out, or it clicks, and a click in a headset while driving startles.
-      level.gain.setValueAtTime(0.0001, now);
-      level.gain.exponentialRampToValueAtTime(0.25, now + 0.02);
-      level.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
-      tone.connect(level).connect(this.channel.destination);
-      tone.start();
-      tone.stop(now + 0.18);
+      this.notes.src = toneFor(which, shape);
+      this.notes.play().catch(() => {});
     } catch {
       // A missing note is a small loss; it must never stop the conversation.
     }
@@ -716,7 +786,6 @@ const sound = {
   },
 };
 
-const beep = (which) => sound.beep(which);
 
 // ------------------------------------------------------------- the free front end
 
@@ -783,29 +852,21 @@ function splitFrontEnd() {
     if (!asked) {
       // Nothing to send means you wanted quiet: hush, and drop what is running.
       mouth?.silence();
-      if (working) { stopWork(); working = false; log("stopped", "work"); }
-      beep("close");
+      if (working) { stopWork(); working = false; stopTicking(); log("stopped", "work"); }
+      sound.note("wiped");
       idleState();
       return;
     }
 
-    beep("close");
+    sound.note("sent");
     trace("SENDING", asked);
     question = [];
     live = "";
     show();
     log(`you: ${asked}`, "you");
 
-    // The one thing Claude cannot be asked, because it is about this conversation
-    // rather than about the code.
-    if (/^(start over|new conversation|forget (that|everything)|reset)$/.test(asked)) {
-      forgetDrive();
-      log("starting fresh", "work");
-      mouth?.speak("Starting fresh.");
-      return;
-    }
-
     working = true;
+    keepTicking();
     setState("thinking…");
     ask(asked).catch((err) => log(String(err.message ?? err), "bad"));
   }
@@ -815,7 +876,7 @@ function splitFrontEnd() {
     question = [];
     live = "";
     mouth?.silence();      // saying it is also how you cut it off
-    beep("open");
+    sound.note("wiped");
     show();
     setState("wiped — start again whenever you like");
   }
@@ -828,6 +889,35 @@ function splitFrontEnd() {
     if (command === "wipe") return wipe();
     if (command === "read") return readBack();
     if (command === "undo") return dropLast();
+    if (command === "forget") return forgetTheDrive();
+  }
+
+  // Claude remembers the whole drive, which is what makes "and the tests?" mean
+  // something. This is how you tell it to stop remembering.
+  function forgetTheDrive() {
+    forgetDrive();
+    question = [];
+    live = "";
+    show();
+    log("forgot the drive so far", "work");
+    mouth?.silence();
+    sound.note("wiped");
+    mouth?.speak("Forgotten. Starting fresh.");
+  }
+
+  // Work takes anywhere from ten seconds to a few minutes, and silence for that long
+  // is indistinguishable from something having gone wrong. So it says quietly that it
+  // is still there — soft, and not often enough to become wallpaper.
+  let tick = null;
+  function keepTicking() {
+    stopTicking();
+    tick = setInterval(() => {
+      if (!mouth?.busy) sound.note("working");
+    }, 15_000);
+  }
+  function stopTicking() {
+    clearInterval(tick);
+    tick = null;
   }
 
   // Says back what it has so far. Its own voice is filtered out of what it hears,
@@ -853,7 +943,7 @@ function splitFrontEnd() {
     log(`took back: ${dropped}`, "work");
     show();
     mouth?.silence();
-    beep("open");
+    sound.note("wiped");
     const left = question.join(" ").trim();
     mouth?.speak(left ? `Taken out. It now ends. ${question[question.length - 1]}` : "Taken out. Nothing left.");
   }
@@ -886,12 +976,15 @@ function splitFrontEnd() {
     }
     if (kind === "final") {
       working = false;
+      stopTicking();
       log(text.slice(0, 400));
+      sound.note("ready");
       mouth?.speak(text);
       return;
     }
     if (kind === "error") {
       working = false;
+      stopTicking();
       log(text, "bad");
       mouth?.speak(text);
     }
@@ -931,6 +1024,7 @@ function splitFrontEnd() {
       mouth?.silence();
       results?.close(); results = null;
       stopWork();
+      stopTicking();
       working = false;
       question = [];
       live = "";
