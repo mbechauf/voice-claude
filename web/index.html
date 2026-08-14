@@ -604,12 +604,33 @@ function readAsInstructions(text, phrases) {
 // driver's seat. So exactly one channel is opened by the Start button, and both the
 // notes and the voice go down it.
 
+// A tenth of a second of real silence. Used once, from the tap, to open the media
+// channel — an empty or malformed sound gets refused and the channel stays shut.
+const OPENING_SOUND =
+  "data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==";
+
 const sound = {
-  channel: null,
-  playing: null,
+  channel: null,   // the notes
+  player: null,    // the voice
+  finish: null,    // how to end the sentence being played, if it is cut off
 
   // Called from the tap itself, never later.
   wake() {
+    // Tells the phone this page is a thing you are listening to, not a decoration.
+    // Without it, everything here is silenced by the mute switch on the side of the
+    // phone — which looks exactly like broken code from the inside, because the page
+    // is told the sound played and it did, into nothing.
+    try {
+      if (navigator.audioSession) {
+        navigator.audioSession.type = "playback";
+        trace("audio session", navigator.audioSession.type);
+      } else {
+        trace("audio session", "not offered by this phone");
+      }
+    } catch (err) {
+      trace("audio session refused", err.message ?? err);
+    }
+
     try {
       this.channel ??= new (window.AudioContext ?? window.webkitAudioContext)();
       if (this.channel.state === "suspended") this.channel.resume();
@@ -617,9 +638,24 @@ const sound = {
     } catch (err) {
       trace("sound channel refused", err.message ?? err);
     }
+
+    // And the media channel, which is what music and video use and what the mute
+    // switch leaves alone. It only opens if the first thing played is real audio
+    // asked for by a tap, so a tenth of a second of genuine silence is played here.
+    try {
+      this.player ??= new Audio();
+      this.player.preload = "auto";
+      this.player.src = OPENING_SOUND;
+      this.player.play().then(
+        () => trace("media channel", "open"),
+        (err) => trace("media channel refused", err.message ?? err),
+      );
+    } catch (err) {
+      trace("media channel refused", err.message ?? err);
+    }
   },
 
-  get awake() { return this.channel?.state === "running"; },
+  get awake() { return Boolean(this.player); },
 
   // Two short notes: rising when something was thrown away, falling when a question
   // has gone. Quicker than a spoken "yes?" and never mistaken for part of an answer.
@@ -645,25 +681,38 @@ const sound = {
     }
   },
 
-  /** Play a piece of speech. Resolves when it has finished, or been cut off. */
-  async say(bytes) {
-    if (!this.channel) throw new Error("no sound channel — press start first");
-    if (this.channel.state === "suspended") await this.channel.resume();
+  /**
+   * Play a piece of speech. Resolves when it has finished, or when it is cut off.
+   *
+   * This goes down the media channel rather than the other one, because the mute
+   * switch silences that one and nobody remembers which way the switch is.
+   */
+  say(bytes) {
+    if (!this.player) return Promise.reject(new Error("no sound channel — press start first"));
 
-    const audio = await this.channel.decodeAudioData(bytes);
-    return new Promise((resolve) => {
-      const source = this.channel.createBufferSource();
-      source.buffer = audio;
-      source.connect(this.channel.destination);
-      source.onended = () => { this.playing = null; resolve(); };
-      this.playing = source;
-      source.start();
+    const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (err) => {
+        if (settled) return;
+        settled = true;
+        this.finish = null;
+        URL.revokeObjectURL(url);
+        if (err) reject(err); else resolve();
+      };
+      // Being cut off has to end this too, or the rest of the answer waits behind a
+      // sentence nobody is listening to any more.
+      this.finish = () => done();
+      this.player.onended = () => done();
+      this.player.onerror = () => done(new Error("the phone refused to play it"));
+      this.player.src = url;
+      this.player.play().catch((err) => done(err));
     });
   },
 
   hush() {
-    try { this.playing?.stop(); } catch {}
-    this.playing = null;
+    try { this.player?.pause(); } catch {}
+    this.finish?.();
   },
 };
 
