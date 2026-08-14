@@ -66,13 +66,25 @@ function checkItKnowsItsOwnVoice() {
 // part of the page that reads speech into instructions is lifted out and run here.
 function checkTheGate(livePhrases) {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
-  const pieces = ["function howItSounds", "function nearlySame", "function phraseStartsAt", "const plainWords", "function makePhraseReader", "function readAsInstructions"]
-    .map((start) => page.match(new RegExp(`${start}[\\s\\S]*?\\n}`)))
-    .filter(Boolean)
-    .map((m) => m[0]);
+  // Each part says where it ends as well as where it starts. Saying only where they
+  // start once worked by accident — a run-on match swept up the list of polite words
+  // sitting between two of them, and adding anything in that gap broke the lot.
+  const wanted = [
+    /function howItSounds[\s\S]*?\n}/,
+    /function nearlySame[\s\S]*?\n}/,
+    /function phraseStartsAt[\s\S]*?\n}/,
+    /const plainWords[\s\S]*?;\n/,
+    /const NOISES = [\s\S]*?\];/,
+    /const STALLS = [\s\S]*?\n\];/,
+    /function withoutFiller[\s\S]*?\n}/,
+    /const POLITENESS = [\s\S]*?\n\]\);/,
+    /function makePhraseReader[\s\S]*?\n}/,
+    /function readAsInstructions[\s\S]*?\n}/,
+  ];
+  const pieces = wanted.map((one) => page.match(one)).filter(Boolean).map((m) => m[0]);
 
-  if (pieces.length !== 6) {
-    check("the page can be read for the gate", false, `found ${pieces.length} of 6 parts`);
+  if (pieces.length !== wanted.length) {
+    check("the page can be read for the gate", false, `found ${pieces.length} of ${wanted.length} parts`);
     return;
   }
 
@@ -192,6 +204,85 @@ function checkTheGate(livePhrases) {
 // Naming a project out loud, in the middle of a sentence. Getting this wrong sends
 // the question to the project you just left, which answers confidently about the
 // wrong code — so it is worth testing rather than discovering at seventy miles an hour.
+// The noises people make while thinking should never reach Claude, and taking them
+// out must not take any meaning with them. The two halves of that are tested
+// together: what comes out, and what must stay in.
+function checkFillerComesOut() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const parts = [/const NOISES = [\s\S]*?\];/, /const STALLS = [\s\S]*?\n\];/, /function withoutFiller[\s\S]*?\n}/]
+    .map((one) => page.match(one))
+    .filter(Boolean)
+    .map((m) => m[0]);
+  if (parts.length !== 3) {
+    check("the page can be read for filler words", false, `found ${parts.length} of 3 parts`);
+    return;
+  }
+
+  const strip = new Function(`${parts.join("\n")}; return withoutFiller;`)();
+
+  const cases = [
+    ["a noise in the middle", "check the um tests", "check the tests"],
+    ["a noise at the front", "er look at the login bug", "look at the login bug"],
+    ["nothing but a noise", "um", ""],
+    ["a stall at the front", "well the tests are failing", "the tests are failing"],
+    ["two stalls stacked up", "well you know the tests are failing", "the tests are failing"],
+    ["a stall at the end", "have a look at the tests you know", "have a look at the tests"],
+    ["a stall in the middle keeps its meaning", "you know the tests you know about", "the tests you know about"],
+    ["an ordinary sentence is left alone", "what changed in the last commit", "what changed in the last commit"],
+    ["words that only look like noises stay", "ering on the side of caution", "ering on the side of caution"],
+    ["the word so as a real word", "so the build is broken", "the build is broken"],
+    ["punctuation left behind is tidied", "well, the tests are failing", "the tests are failing"],
+    ["nothing at all", "", ""],
+  ];
+
+  for (const [name, said, expected] of cases) {
+    const got = strip(said);
+    check(`filler: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+  }
+}
+
+// Deciding a thought is finished is what saves saying the send phrase every time, and
+// the only failure that actually costs anything is calling something finished when it
+// was not — that interrupts. So the cases here lean hard on the unfinished side.
+function checkFinishedThoughts() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const parts = [
+    /const plainWords[\s\S]*?;\n/,
+    /const NOISES = [\s\S]*?\];/,
+    /const STALLS = [\s\S]*?\n\];/,
+    /function withoutFiller[\s\S]*?\n}/,
+    /const CANNOT_END = [\s\S]*?\n\]\);/,
+    /function soundsFinished[\s\S]*?\n}/,
+  ].map((one) => page.match(one)).filter(Boolean).map((m) => m[0]);
+  if (parts.length !== 6) {
+    check("the page can be read for finished thoughts", false, `found ${parts.length} of 6 parts`);
+    return;
+  }
+
+  const finished = new Function(`${parts.join("\n")}; return soundsFinished;`)();
+
+  const cases = [
+    ["a plain question", "what changed in the last commit", true],
+    ["an instruction", "run the tests", true],
+    ["a short question", "any failures", true],
+    ["hanging on a joining word", "check the tests and", false],
+    ["hanging on a pointing word", "what changed in the", false],
+    ["hanging on a linking word", "have a look at the tests for", false],
+    ["hanging on a helper verb", "the build is", false],
+    ["trailing off with a noise", "can you look at the um", false],
+    ["a noise after a finished sentence", "run the tests um", true],
+    ["one word is never enough", "tests", false],
+    ["nothing said", "", false],
+    ["ending on a question word", "tell me what", false],
+    ["a finished sentence with a full stop", "look at the tests.", true],
+  ];
+
+  for (const [name, said, expected] of cases) {
+    const got = finished(said);
+    check(`finished: ${name}`, got === expected, got === expected ? "" : `said ${got}`);
+  }
+}
+
 function checkPickingAProject(names) {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
   const source = page.match(/  function projectAtTheFront[\s\S]*?\n  }/);
@@ -351,6 +442,8 @@ try {
   );
 
   checkItKnowsItsOwnVoice();
+  checkFillerComesOut();
+  checkFinishedThoughts();
   checkTheGate(setup.phrases);
   checkPickingAProject({ projectNames: setup.projectNames, giveaways: setup.giveaways });
 } finally {

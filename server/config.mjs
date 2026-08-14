@@ -282,6 +282,15 @@ export const ALLOWED_TOOLS = [
   "Bash(gh issue list:*)",
   "Bash(gh issue view:*)",
 
+  // Adding to an issue that already exists. Missing at first, and the cost showed
+  // up immediately: work done against an issue could not be recorded on it, so it
+  // went into a note in a file — which is the exact thing the issue list exists to
+  // prevent. Commenting adds to the record and takes nothing away.
+  //
+  // Editing and closing stay off. Rewriting what an issue says, or deciding
+  // something is finished, are not things to do while watching the road.
+  "Bash(gh issue comment:*)",
+
   // Checking its own work. Added 2026-08-14: it was changing code and then unable
   // to find out whether the change was any good, which is half a job. These two run
   // the checks and nothing else — starting servers and installing things stay off,

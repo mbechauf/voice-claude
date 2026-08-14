@@ -526,6 +526,112 @@ function phraseStartsAt(words, index, phrase) {
 const plainWords = (text) =>
   text.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
 
+// Real speech is full of noise that carries no meaning: "um", "er", and the little
+// stalling phrases people say while they think. None of it belongs in a question,
+// and none of it should count towards deciding whether a thought is finished — "look
+// at the, um" is no more finished than "look at the".
+//
+// Two kinds, treated differently on purpose. The first are not words at all in any
+// sentence, so they come out wherever they appear. The second are ordinary words that
+// happen to be used as stalling — "you know the tests fail" means something — so they
+// only come out at the very start or the very end of a piece, where they are padding
+// rather than sense.
+const NOISES = ["um", "umm", "uh", "uhh", "er", "erm", "ah", "hmm", "mm", "mmm", "eh"];
+const STALLS = [
+  ["you", "know"], ["i", "mean"], ["let's", "see"], ["lets", "see"],
+  ["sort", "of"], ["kind", "of"], ["like", "i", "said"], ["well"], ["so"], ["like"],
+];
+
+// Keeps the words as they were said — casing, punctuation and all — and only takes
+// things out, so what is left reads exactly as it was spoken.
+function withoutFiller(text) {
+  const bare = (token) => token.toLowerCase().replace(/[^a-z0-9']/g, "");
+  let tokens = String(text ?? "").split(/\s+/).filter(Boolean);
+
+  tokens = tokens.filter((token) => {
+    const word = bare(token);
+    return word ? !NOISES.includes(word) : true;
+  });
+
+  // A stall at an end can be followed by another one — "well, you know, the tests" —
+  // so both ends are pared back for as long as something keeps coming off.
+  const matchesAt = (at, stall) =>
+    stall.every((wanted, offset) => bare(tokens[at + offset] ?? "") === wanted);
+
+  let trimming = true;
+  while (trimming && tokens.length) {
+    trimming = false;
+    for (const stall of STALLS) {
+      if (tokens.length >= stall.length && matchesAt(0, stall)) {
+        tokens = tokens.slice(stall.length);
+        trimming = true;
+        break;
+      }
+      if (tokens.length >= stall.length && matchesAt(tokens.length - stall.length, stall)) {
+        tokens = tokens.slice(0, tokens.length - stall.length);
+        trimming = true;
+        break;
+      }
+    }
+  }
+
+  // Taking words out can leave punctuation stranded at the front — ", the tests".
+  return tokens.join(" ").replace(/^[\s,;:.!?-]+/, "").trim();
+}
+
+// Words that cannot be the last word of anything. Not a list of sentences that count
+// as finished — there is no such list — but the other way round: English has a small
+// closed set of words whose whole job is to point at something that has not been said
+// yet. "Check the tests and" is unfinished because of "and", not because of anything
+// about tests. That is what makes this general rather than a set of patterns.
+const CANNOT_END = new Set([
+  // joining words, which promise another clause
+  "and", "or", "but", "so", "because", "if", "when", "while", "though", "although",
+  "unless", "until", "than", "whether", "that", "as", "since", "before", "after",
+  // pointing words, which promise a thing
+  "the", "a", "an", "my", "your", "our", "their", "its", "his", "her", "this",
+  "these", "those", "some", "any", "no", "every", "each", "another", "both",
+  // words that link to a thing, which promise the thing
+  "of", "to", "for", "with", "at", "in", "on", "from", "about", "into", "onto",
+  "over", "under", "between", "through", "across", "against", "without", "within",
+  "by", "up", "down", "off", "out", "near", "per", "via", "like",
+  // helper verbs, which promise the verb that matters
+  "is", "are", "was", "were", "am", "be", "been", "being", "do", "does", "did",
+  "have", "has", "had", "can", "could", "will", "would", "shall", "should", "may",
+  "might", "must", "let", "lets", "let's", "going", "want", "need", "try",
+  // question words dangling on their own
+  "what", "which", "who", "whom", "whose", "where", "how", "why",
+  // very common half-finished endings
+  "very", "more", "most", "just", "also", "not", "too", "quite", "really",
+]);
+
+/**
+ * Does this sound like a finished thought?
+ *
+ * Used at a pause, to decide whether it is worth offering to send. A pause on its own
+ * is a terrible signal — in a car a pause is someone thinking — but a pause after
+ * something that reads as a whole sentence is a good one.
+ *
+ * Deliberately cautious in one direction only. Saying "not finished" when it was
+ * finished costs nothing: the send phrase still works, exactly as it does today.
+ * Saying "finished" when it was not costs an interruption, so the test has to be able
+ * to say no.
+ */
+function soundsFinished(text) {
+  const raw = String(text ?? "").trim();
+  const words = plainWords(withoutFiller(raw));
+
+  // One word is an answer or a fragment, not a thought worth guessing about. Two is
+  // the shortest real question there is — "what changed", "any failures".
+  if (words.length < 2) return false;
+
+  // Dictation only writes a full stop or a question mark when it was actually spoken
+  // or clearly heard, so when one turns up at the end it settles the matter.
+  if (/[.?!]$/.test(raw) && !CANNOT_END.has(words[words.length - 1])) return true;
+
+  return !CANNOT_END.has(words[words.length - 1]);
+}
+
 /**
  * Reads speech as it arrives and says what to do about it.
  *
@@ -870,6 +976,48 @@ function splitFrontEnd() {
   let working = false;
   let ears = null;
 
+  // Offering to send, once what you have said sounds like a finished sentence. The
+  // send phrase is still the certain way; this is about not needing it every time.
+  //
+  // It offers rather than sends, and it waits a beat before offering, because the two
+  // ways this goes wrong are opposites. "Check the tests and" is caught by the words
+  // themselves. "Look at the tests." … "Also the migrations." is a finished sentence
+  // that was still going, and no reading of the words can tell — only waiting can, so
+  // anything you say next calls the offer off before it is made.
+  let offerTimer = null;
+  let declined = 0;      // asked and told no, on the question as it stands
+
+  function stopOffering() {
+    if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
+  }
+
+  function maybeOfferToSend() {
+    stopOffering();
+    // Twice told no is a person who wants to keep talking. Stop asking until this
+    // question is out of the way; nagging is worse than needing the phrase.
+    if (declined >= 2) return;
+    if (waitingOn || working) return;
+    if (reader.held()) return;                       // a command may still be forming
+    if (!soundsFinished(question.join(" "))) return;
+
+    const beat = setup.offerAfter ?? 1_500;
+    const offer = () => {
+      offerTimer = null;
+      if (waitingOn || working || live || reader.held()) return;
+      if (!question.length || !soundsFinished(question.join(" "))) return;
+      // Talking underneath its own voice is the one thing that makes an offer worse
+      // than useless, so it waits for quiet rather than cutting in.
+      if (mouth?.busy) { offerTimer = setTimeout(offer, 500); return; }
+      trace("OFFERING TO SEND", question.join(" "));
+      askYesNo("Send that?", send, () => {
+        declined += 1;
+        trace("offer declined", `${declined}`);
+        sound.note("listening");
+      });
+    };
+    offerTimer = setTimeout(offer, beat);
+  }
+
   function show() {
     const settled = [question.join(" "), reader.held()].filter(Boolean).join(" ");
     promptEl.textContent = settled;
@@ -901,6 +1049,8 @@ function splitFrontEnd() {
   // Everything that was said, sent as one. This is the only thing that empties the
   // screen, and it only ever happens because you asked for it.
   async function send() {
+    stopOffering();
+    declined = 0;
     // If you named a project in the same breath, that has to land first.
     if (switching) { trace("waiting for the project to change"); await switching; }
 
@@ -929,6 +1079,8 @@ function splitFrontEnd() {
   }
 
   function wipe() {
+    stopOffering();
+    declined = 0;
     trace("WIPED", question.join(" "));
     lastEmptied = question;
     question = [];
@@ -995,18 +1147,32 @@ function splitFrontEnd() {
     if (waitTimer) clearTimeout(waitTimer);
     blipWhenItIsYourTurn();
     const window = setup.answerWindow ?? 25_000;
+
+    // The clock is on your thinking time, and thinking time starts when the talking
+    // stops. Merely pausing the clock while it speaks is not enough — a long answer
+    // uses the whole window up before the question has even been asked, and then the
+    // window shuts the moment the last word lands. That is what happened: the window
+    // closed three seconds before an answer that was given straight away.
+    //
+    // So every moment it is still talking pushes the deadline out afresh. However
+    // long the answer, you get the full window after it, and the short gaps between
+    // one sentence and the next cannot be mistaken for silence.
+    let deadline = Date.now() + window;
     const closeUnlessStillTalking = () => {
-      // A long answer can take longer to read than the window lasts, and it would be
-      // absurd to stop waiting for a reply before finishing the question. The clock
-      // is really on your thinking time, so it does not start until it stops talking.
-      if (mouth?.busy) { waitTimer = setTimeout(closeUnlessStillTalking, 2_000); return; }
+      if (mouth?.busy) {
+        deadline = Date.now() + window;
+        waitTimer = setTimeout(closeUnlessStillTalking, 500);
+        return;
+      }
+      const left = deadline - Date.now();
+      if (left > 0) { waitTimer = setTimeout(closeUnlessStillTalking, Math.min(500, left)); return; }
       trace("stopped waiting", "no answer");
       // Say so. Silence after a question is indistinguishable from a window still
       // being open, and the cost of guessing wrong is saying "yes" into nothing.
       sound.note("tooLate");
       stopWaiting();
     };
-    waitTimer = setTimeout(closeUnlessStillTalking, window);
+    waitTimer = setTimeout(closeUnlessStillTalking, 500);
   }
 
   function askYesNo(spoken, onYes, onNo) {
@@ -1213,6 +1379,8 @@ function splitFrontEnd() {
   // Claude remembers the whole drive, which is what makes "and the tests?" mean
   // something. This is how you tell it to stop remembering.
   function forgetTheDrive() {
+    stopOffering();
+    declined = 0;
     forgetDrive();
     lastEmptied = question;
     question = [];
@@ -1284,6 +1452,9 @@ function splitFrontEnd() {
 
   function heard(text) {
     live = "";
+    // Anything you say calls off an offer that has not been made yet — this is what
+    // stops a sentence you were still adding to from being asked about.
+    stopOffering();
 
     // A one-word answer to a question it has just asked goes through before anything
     // else, echo test included. The echo test only counts words longer than three
@@ -1315,25 +1486,32 @@ function splitFrontEnd() {
       // "can you work on the login bug". So it only counts as changing project if
       // what follows actually names one; otherwise both halves go back where they
       // came from and it is a question like any other.
+      // The noises come out here, before anything reads what was said: a project name
+      // with an "um" in front of it is still the project name.
+      const said = withoutFiller(step.say);
+      if (!said) { trace("dropped (nothing but filler)", step.say); continue; }
+      if (said !== step.say) trace("filler out", `${step.say} -> ${said}`);
+
       if (awaitingProject) {
-        const found = projectAtTheFront(step.say);
+        const found = projectAtTheFront(said);
         awaitingProject = null;
         if (found) {
           switchTo(found.project);
           if (found.rest) { question.push(found.rest); trace("keeping", found.rest); }
           continue;
         }
-        question.push(`${awaitingProject ?? ""} ${step.say}`.trim());
-        trace("not a project, so just words", step.say);
+        question.push(`${awaitingProject ?? ""} ${said}`.trim());
+        trace("not a project, so just words", said);
         continue;
       }
 
-      question.push(step.say);
-      trace("keeping", step.say);
+      question.push(said);
+      trace("keeping", said);
     }
 
     show();
     if (!mouth?.busy) idleState();
+    maybeOfferToSend();
   }
 
   function fromClaude(kind, text) {
@@ -1369,7 +1547,7 @@ function splitFrontEnd() {
 
       ears = deviceEars({
         onHeard: heard,
-        onHearing: (text) => { live = text; show(); },
+        onHearing: (text) => { live = text; stopOffering(); show(); },
         // Talking over it has to stop it straight away rather than at the end of
         // your sentence, so this acts on words it has not finished hearing.
         onPartialPhrase: (text) => {
