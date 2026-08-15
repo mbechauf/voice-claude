@@ -77,18 +77,47 @@ const lines = fs
   .map((line) => JSON.parse(line))
   .filter((entry) => entry.said);
 
+// The interesting question was never "words or meaning" but whether meaning helps
+// where words fail. So: the words decide; only when they find nothing at all is the
+// encoder asked, and then only for the handful of commands whose wrong firing costs
+// nothing — reading the question back to you, saying which project you are on. It is
+// never allowed to send, wipe, or switch on a guess.
+const HARMLESS_IF_WRONG = new Set(["help", "read", "where"]);
+const SURE_ENOUGH = 0.72;
+
+let encoderSays = {};
+try {
+  encoderSays = JSON.parse(fs.readFileSync(path.join(root, "data", "encoder-verdicts.json"), "utf8"));
+} catch {
+  // Not measured yet. The words answer on their own, as they always have.
+}
+
+function withMeaningAsWell(said) {
+  const byWords = whatItThinks(said);
+  if (byWords !== "none") return byWords;
+
+  const verdict = encoderSays[said];
+  if (!verdict) return "none";
+  if (verdict.nearness < SURE_ENOUGH) return "none";
+  if (!HARMLESS_IF_WRONG.has(verdict.command)) return "none";
+  return verdict.command;
+}
+
 const wrong = [];
 const missed = [];
 let right = 0;
 
+const useMeaning = process.argv.includes("--with-meaning");
+
 for (const { said, meant, from, note } of lines) {
-  const thought = whatItThinks(said);
+  const thought = useMeaning ? withMeaningAsWell(said) : whatItThinks(said);
   if (thought === meant) { right += 1; continue; }
   (meant === "none" ? wrong : missed).push({ said, meant, thought, from, note });
 }
 
 const real = lines.filter((l) => l.from === "real").length;
 
+console.log(`\n${useMeaning ? "WORDS, THEN MEANING WHERE WORDS FIND NOTHING" : "WORDS ONLY"}`);
 console.log(`\n${right} of ${lines.length} understood — ${Math.round((right / lines.length) * 100)}%`);
 console.log(`(${real} of these were really said out loud; the rest are the awkward cases)\n`);
 
