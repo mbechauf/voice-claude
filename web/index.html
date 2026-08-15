@@ -142,6 +142,12 @@ let newPageWaiting = false;
 // assembled words to a version bump would be its own small betrayal.
 const KEPT = "voice-claude-question";
 
+// Set when the app reloads itself, so the page that comes back knows it is a restart
+// rather than somebody opening the page. A restart is the one reload where silence is
+// unacceptable: the driver asked for something, everything went quiet, and nothing
+// told them it was back. So the new page starts itself and says so out loud.
+const RESTARTED = "voice-claude-restarted";
+
 async function checkForANewPage({ reloadIfIdle }) {
   try {
     const now = await (await fetch("/setup")).json();
@@ -189,6 +195,7 @@ let questionInProgress = () => "";
 function loadTheNewPage(keep = "") {
   try {
     if (keep) sessionStorage.setItem(KEPT, keep);
+    sessionStorage.setItem(RESTARTED, "1");
   } catch {}
   trace("LOADING THE NEW PAGE");
   location.reload();
@@ -946,8 +953,13 @@ const sound = {
   player: null,    // the voice
   notes: null,     // the little sounds
   finish: null,    // how to end the sentence being played, if it is cut off
+  // Set when the browser turns down the request to make sound. This is the one
+  // failure that is invisible from the inside — the page is told it played, and it
+  // did, into nothing — so it is written down here and turned into a visible ask.
+  refused: false,
 
-  // Called from the tap itself, never later.
+  // Opening the channel used to be possible only from a tap. It is tried without one
+  // now, and a browser that says no sets `refused` rather than failing quietly.
   wake() {
     // Tells the phone this page is a thing you are listening to, not a decoration.
     // Without it, everything here is silenced by the mute switch on the side of the
@@ -980,8 +992,8 @@ const sound = {
       this.player.preload = "auto";
       this.player.src = OPENING_SOUND;
       this.player.play().then(
-        () => trace("media channel", "open"),
-        (err) => trace("media channel refused", err.message ?? err),
+        () => { this.refused = false; trace("media channel", "open"); },
+        (err) => { this.refused = true; trace("media channel refused", err.message ?? err); },
       );
 
       // The notes get their own, so that a note never cuts a sentence in half.
@@ -1118,13 +1130,19 @@ function splitFrontEnd() {
     if (declined >= 2) return;
     if (waitingOn || working) return;
     if (reader.held()) return;                       // a command may still be forming
-    if (!soundsFinished(question.join(" "))) return;
+    if (!question.length) return;
 
-    const beat = setup.offerAfter ?? 1_500;
+    // Two clocks, and the words decide which one. A sentence that sounds finished only
+    // has to survive a beat before it is worth asking about. One that does not sound
+    // finished still gets asked about eventually, because "and then the other thing"
+    // left hanging for ten seconds is far more often someone who has stopped talking
+    // than someone mid-thought — and the cost of asking is one word.
+    const finished = soundsFinished(question.join(" "));
+    const beat = finished ? (setup.offerAfter ?? 1_500) : (setup.offerAfterPause ?? 10_000);
     const offer = () => {
       offerTimer = null;
       if (waitingOn || working || live || reader.held()) return;
-      if (!question.length || !soundsFinished(question.join(" "))) return;
+      if (!question.length) return;
       // Talking underneath its own voice is the one thing that makes an offer worse
       // than useless, so it waits for quiet rather than cutting in.
       if (mouth?.busy) { offerTimer = setTimeout(offer, 500); return; }
@@ -1491,8 +1509,23 @@ function splitFrontEnd() {
   // just left, so sending waits for this to land.
   let switching = null;
 
-  async function switchTo(name) {
+  // Naming the project you are already on is not a change of project. Announcing it
+  // is a confirmation of nothing, and — worse — the clearing below would throw away
+  // everything said in the same breath, so the instruction has to be given twice.
+  // Both happened: "work on the voice app" while on the voice app ate the sentence
+  // it was attached to.
+  async function switchTo(name, rest = "") {
     awaitingProject = null;
+    if (name === setup.project) {
+      trace("ALREADY THERE", name);
+      if (rest) {
+        question.push(rest);
+        trace("keeping", rest);
+      } else {
+        mouth?.speak(`Already on ${name}.`);
+      }
+      return;
+    }
     mouth?.silence();
     let landed;
     switching = new Promise((resolve) => { landed = resolve; });
@@ -1515,6 +1548,13 @@ function splitFrontEnd() {
       setup.project = result.project;
       question = [];
       live = "";
+      // What came after the switch was aimed at the new project, so it survives the
+      // clearing. It is put back here rather than by the caller because the clearing
+      // happens after the round trip, and would otherwise wipe it a moment later.
+      if (rest) {
+        question.push(rest);
+        trace("keeping", rest);
+      }
       show();
       trace("PROJECT", result.project);
       log(`now working on ${result.project}`, "work");
@@ -1552,7 +1592,7 @@ function splitFrontEnd() {
     stopTicking();
     tick = setInterval(() => {
       if (!mouth?.busy) sound.note("working");
-    }, 15_000);
+    }, 10_000);
   }
   function stopTicking() {
     clearInterval(tick);
@@ -1648,8 +1688,7 @@ function splitFrontEnd() {
         const found = projectAtTheFront(said);
         awaitingProject = null;
         if (found) {
-          switchTo(found.project);
-          if (found.rest) { question.push(found.rest); trace("keeping", found.rest); }
+          switchTo(found.project, found.rest);
           continue;
         }
         question.push(`${awaitingProject ?? ""} ${said}`.trim());
@@ -1752,9 +1791,25 @@ function splitFrontEnd() {
     // The same thing the closing phrase does, for when the road is too loud to be
     // heard over. Never needed, always there.
     tap() {
+      // A browser that refused to make sound to a page nobody had touched will hand
+      // it over the moment somebody does. So the first tap after a refusal buys the
+      // voice back rather than sending, which is the only thing it could be for.
+      if (sound.refused) {
+        sound.wake();
+        trace("tapped: asking for sound again");
+        setState("listening — talk whenever you like");
+        return;
+      }
       if (mouth?.busy) { mouth.silence(); trace("tapped: quiet"); return; }
       trace("tapped: send");
       send();
+    },
+    // Something the app says on its own account, with nobody having asked. Kept apart
+    // from answers so anything that needs to speak up for itself has a way to.
+    say(text) {
+      trace("announcing", text);
+      log(text, "work");
+      mouth?.speak(text);
     },
   };
 }
@@ -2009,6 +2064,11 @@ function realtimeFrontEnd() {
     // This mode hears you continuously and has no gate, so the button has nothing to
     // toggle. It is still the fastest way to shut it up.
     tap: () => speakThrough("[The user pressed quiet. Stop talking and wait.]"),
+    say: (text) => {
+      trace("announcing", text);
+      log(text, "work");
+      speakThrough(`[Status update, not from the user: say exactly this, then wait: ${text}]`);
+    },
   };
 }
 
@@ -2028,21 +2088,22 @@ document.addEventListener("visibilitychange", () => {
 });
 
 let carriedOver = "";
-try { carriedOver = sessionStorage.getItem(KEPT) ?? ""; } catch {}
+let cameBackFromARestart = false;
+try {
+  carriedOver = sessionStorage.getItem(KEPT) ?? "";
+  cameBackFromARestart = sessionStorage.getItem(RESTARTED) === "1";
+  sessionStorage.removeItem(RESTARTED);
+} catch {}
 
-if (carriedOver) {
-  // It reloaded under you. The one thing that cannot survive a reload is permission
-  // to make sound, so this is the only moment a tap is genuinely required.
-  promptEl.textContent = carriedOver;
-  setState("new version loaded — tap once to get the voice back");
-  goBtn.textContent = "Tap to carry on";
-} else {
-  setState(
-    setup.mode === "realtime"
-      ? `ready — paid voice, working on ${setup.project}`
-      : `ready — free voice, working on ${setup.project}`
-  );
-}
+// Whatever was being said when the ground moved is still on the screen while the
+// session gets itself going again.
+if (carriedOver) promptEl.textContent = carriedOver;
+
+setState(
+  setup.mode === "realtime"
+    ? `ready — paid voice, working on ${setup.project}`
+    : `ready — free voice, working on ${setup.project}`
+);
 
 function backToStopped() {
   running = false;
@@ -2056,11 +2117,8 @@ function backToStopped() {
   heardEl.className = "";
 }
 
-// While it is running the big button is the gate, not a hang-up. Ending the session
-// is the rare thing, so it gets the small link and cannot be hit by accident.
-goBtn.onclick = async () => {
-  if (running) return frontEnd.tap();
-
+async function begin({ announce = "" } = {}) {
+  if (running) return;
   running = true;
   goBtn.disabled = true;
   holdScreenAwake();
@@ -2070,8 +2128,44 @@ goBtn.onclick = async () => {
   } catch (err) {
     log(String(err.message ?? err), "bad");
     backToStopped();
+    return;
   }
-};
+  if (announce) frontEnd.say?.(announce);
+  // Starting itself works wherever the browser already trusts this page, which after
+  // the first drive is everywhere. Where it does not, the refusal is only ever about
+  // making sound — it is still listening — so it asks for the one thing that fixes
+  // it, rather than pretending to be talking into a phone that is muting it.
+  setTimeout(() => {
+    if (!running || !sound.refused) return;
+    setState("it is listening — tap once to give it its voice back");
+    goBtn.textContent = "Tap for the voice";
+    goBtn.className = "";
+  }, 800);
+}
+
+// While it is running the big button is the gate, not a hang-up. Ending the session
+// is the rare thing, so it gets the small link and cannot be hit by accident.
+goBtn.onclick = () => (running ? frontEnd.tap() : begin());
+
+// Nothing here should need a tap at seventy miles an hour, and that includes getting
+// going again after the app has restarted underneath you. So it starts itself, and
+// when the reload was a restart it says so out loud — because from the driver's seat
+// a silent restart and a broken app are the same thing.
+//
+// A tap is only ever asked for when the browser actually refuses to make sound, and
+// that refusal is noticed a moment after starting rather than assumed in advance.
+//
+// One thing is still left behind a tap: a paid session costs money by the minute and
+// must never begin because a page happened to load.
+if (setup.mode !== "realtime") {
+  begin({
+    announce: cameBackFromARestart
+      ? carriedOver
+        ? "Application restarted, ready for further instructions. What you were saying is still here."
+        : "Application restarted, ready for further instructions."
+      : "",
+  });
+}
 
 endBtn.onclick = () => {
   frontEnd.stop();
