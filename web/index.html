@@ -2145,12 +2145,34 @@ async function begin({ announce = "" } = {}) {
 
 // While it is running the big button is the gate, not a hang-up. Ending the session
 // is the rare thing, so it gets the small link and cannot be hit by accident.
-goBtn.onclick = () => (running ? frontEnd.tap() : begin());
+goBtn.onclick = () => (running ? frontEnd.tap() : begin({ announce: whatItSaysOnStarting() }));
+
+// Coming up silent is indistinguishable from being broken, so every way of starting
+// says the same three things out loud: that it is here, which project it is working
+// in, and — when the start was a restart rather than somebody arriving — that it has
+// just come back. Naming the project matters most on a fresh start, because that is
+// exactly the moment nobody has said yet where the work is going to land.
+//
+// This is written once and used by every route into a session, so a new way of
+// starting cannot quietly be a silent one.
+function whatItSaysOnStarting() {
+  // Deliberately nameless. Saying "Voice Claude, ready and working on the advisor
+  // app" put the name of one project next to the name of another in a single breath,
+  // and the first one heard is the one that sticks — so it announced itself as being
+  // on the voice app while working on the advisor app. The only name worth saying
+  // here is the project's, because that is the one that decides where the work lands.
+  const here = `Ready, working on ${setup.project}.`;
+  if (!cameBackFromARestart) return here;
+  cameBackFromARestart = false;   // a later start is a start, not another restart
+  return carriedOver
+    ? `Application restarted. ${here} What you were saying is still here.`
+    : `Application restarted. ${here}`;
+}
 
 // Nothing here should need a tap at seventy miles an hour, and that includes getting
-// going again after the app has restarted underneath you. So it starts itself, and
-// when the reload was a restart it says so out loud — because from the driver's seat
-// a silent restart and a broken app are the same thing.
+// going again after the app has restarted underneath you. So it starts itself and
+// says so — because from the driver's seat a silent restart and a broken app are the
+// same thing.
 //
 // A tap is only ever asked for when the browser actually refuses to make sound, and
 // that refusal is noticed a moment after starting rather than assumed in advance.
@@ -2158,13 +2180,7 @@ goBtn.onclick = () => (running ? frontEnd.tap() : begin());
 // One thing is still left behind a tap: a paid session costs money by the minute and
 // must never begin because a page happened to load.
 if (setup.mode !== "realtime") {
-  begin({
-    announce: cameBackFromARestart
-      ? carriedOver
-        ? "Application restarted, ready for further instructions. What you were saying is still here."
-        : "Application restarted, ready for further instructions."
-      : "",
-  });
+  begin({ announce: whatItSaysOnStarting() });
 }
 
 endBtn.onclick = () => {
