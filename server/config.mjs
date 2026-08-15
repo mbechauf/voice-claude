@@ -264,15 +264,42 @@ export const OPEN_TIMEOUT_MS = Number(process.env.VOICE_CLAUDE_OPEN_TIMEOUT ?? 0
 export const VOICE_MODEL = process.env.VOICE_CLAUDE_MODEL ?? "gpt-realtime-2.1-mini";
 export const VOICE_NAME = process.env.VOICE_CLAUDE_VOICE ?? "marin";
 
-// Claude cannot stop to ask permission — you are driving — so this list is the only
-// thing standing between it and your files, and it is deliberately explicit.
+// ------------------------------------------------------- what it is allowed to do
 //
-// It may now write. That was asked for knowingly, and it is worth being clear about
-// what it means: work happens while you cannot see it. What protects you is not
-// this list any more but version control — everything it does shows up as changes
-// you can read and undo when you get out of the car. It may not commit, push, or
-// run anything destructive, so nothing it does while you drive is hard to reverse.
-export const ALLOWED_TOOLS = [
+// Permission is asked for, not enumerated.
+//
+// It used to be a list, and that failed exactly as a list must: it could commit and
+// push but not merge, could edit files but not the one file that would have let it
+// merge, and could not widen its own permissions to fix either — all discovered from
+// a car, silently, with no way to grant anything. A list can only contain what its
+// author thought of in advance, so the work stops wherever imagination ran out.
+//
+// So the check moved to where it belongs: it asks, out loud, at the moment it
+// matters, and a spoken yes authorises it. That is a real safety check made by the
+// person it protects, rather than a fence built last week by someone guessing.
+//
+// What it must ask about, and what it must never do, are in spoken-answer-rules.md —
+// instructions rather than a fence, because the fence was the problem.
+//
+// The one thing that does not move: it still cannot change these rules. Something
+// that can widen its own permissions has none.
+
+// Refused outright, no matter what is said. Not because consent does not count, but
+// because these are hard or impossible to undo, and "are you sure?" answered from
+// behind the wheel is not the kind of consent they need. They wait for a desk.
+export const NEVER = [
+  "Bash(rm -rf:*)",
+  "Bash(sudo:*)",
+  "Bash(git push --force:*)",
+  "Bash(git push -f:*)",
+  "Bash(git reset --hard:*)",
+  "Bash(git clean:*)",
+  "Bash(gh repo delete:*)",
+];
+
+// Kept only so the older, list-based mode still works if this turns out to be a
+// mistake: set this and it goes back to refusing anything not named here.
+export const ONLY_THESE = process.env.VOICE_CLAUDE_ONLY_ALLOW === "on" ? [
   "Read",
   "Grep",
   "Glob",
@@ -320,7 +347,21 @@ export const ALLOWED_TOOLS = [
   // asking them to restart it is asking them to do the one thing they cannot.
   "Bash(npm run restart:*)",
   "Bash(npm run score:*)",
-];
+
+  // Committing and pushing, added 2026-08-15 while driving, asked for out loud.
+  // Work that only exists in the working tree is work nobody else can see and one
+  // bad afternoon away from being lost, so a change made on the road has to be able
+  // to land. The old rule said no, and the cost was a drive's worth of work sitting
+  // uncommitted until someone got to a desk.
+  //
+  // The risk is real and accepted: a push is the one thing here that leaves the
+  // machine. What keeps it survivable is that every commit is visible afterwards and
+  // can be undone; what would not be survivable is a force push, which is why only
+  // the ordinary forms are listed.
+  "Bash(git add:*)",
+  "Bash(git commit:*)",
+  "Bash(git push:*)",
+] : null;
 
 // How long to let a single piece of work run before giving up on it.
 export const WORK_TIMEOUT_MS = Number(process.env.VOICE_CLAUDE_TIMEOUT ?? 10 * 60_000);

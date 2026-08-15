@@ -2,7 +2,7 @@
 // goes, so the voice has something honest to say during the long pauses.
 
 import { spawn } from "node:child_process";
-import { ALLOWED_TOOLS, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
+import { NEVER, ONLY_THESE, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
 
 // Turns a tool name into something sayable. Deliberately vague about paths —
 // nobody driving wants to hear a directory listing.
@@ -72,11 +72,23 @@ export function startWork(request, emit, { briefing = "", project = STARTING_PRO
     "--output-format",
     "stream-json",
     "--verbose",
-    "--permission-mode",
-    "dontAsk",
-    "--allowedTools",
-    ...ALLOWED_TOOLS,
   ];
+
+  // Two ways of deciding what it may do, and only one of them is on.
+  //
+  // By default it may act, and asks first — a spoken question, a spoken yes. Stopping
+  // to ask through a permission prompt is useless here because there is no screen to
+  // answer it on, so the asking happens in the conversation instead, where the person
+  // already is. A short list is still refused outright: things that cannot be undone
+  // are not things to consent to at seventy miles an hour.
+  //
+  // The old way — a fixed list of permitted actions, everything else refused without
+  // asking — is one setting away, in case this proves to have been a bad idea.
+  if (ONLY_THESE) {
+    args.push("--permission-mode", "dontAsk", "--allowedTools", ...ONLY_THESE);
+  } else {
+    args.push("--permission-mode", "bypassPermissions", "--disallowedTools", ...NEVER);
+  }
 
   // Continue the same conversation rather than starting cold every time.
   if (conversationId) args.push("--resume", conversationId);

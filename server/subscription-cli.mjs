@@ -7,7 +7,11 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { ALLOWED_TOOLS, PROJECT_DIR, WORK_TIMEOUT_MS } from "./config.mjs";
+import { NEVER, ONLY_THESE, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
+
+// This mode predates the projects list and has no way to be told which one you mean,
+// so it works where a drive starts. Same permission model as everywhere else.
+const PROJECT_DIR = STARTING_PROJECT;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -103,10 +107,9 @@ function runClaude(request, sessionId) {
       "--output-format",
       "stream-json",
       "--verbose",
-      "--permission-mode",
-      "dontAsk",
-      "--allowedTools",
-      ...ALLOWED_TOOLS,
+      ...(ONLY_THESE
+        ? ["--permission-mode", "dontAsk", "--allowedTools", ...ONLY_THESE]
+        : ["--permission-mode", "bypassPermissions", "--disallowedTools", ...NEVER]),
     ];
     if (sessionId) args.push("--resume", sessionId);
 

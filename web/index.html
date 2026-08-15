@@ -6,8 +6,13 @@
 <title>voice-claude</title>
 <style>
   :root { color-scheme: dark; }
+  /* Fixed to the height of the screen, and box-sized so the safe-area padding is
+     counted inside it. The page itself must never scroll: if it does, the transcript
+     grows past the bottom of the screen and pinning it to the newest line silently
+     stops working. Exactly one thing scrolls here, and it is the transcript. */
   body {
-    margin: 0; min-height: 100dvh; display: flex; flex-direction: column;
+    margin: 0; height: 100dvh; box-sizing: border-box; overflow: hidden;
+    display: flex; flex-direction: column;
     background: #14140f; color: #f0ece2;
     font: 16px/1.5 ui-sans-serif, -apple-system, system-ui, sans-serif;
     padding: env(safe-area-inset-top) 1rem env(safe-area-inset-bottom);
@@ -82,7 +87,15 @@ function log(text, cls = "") {
   div.className = `line ${cls}`;
   div.textContent = text;
   logEl.append(div);
+  scrollToNewest();
+}
+
+// Always show the newest line. Setting this straight after appending is right most
+// of the time, but a long answer can still be laying itself out when we ask, so we
+// ask again once the browser has finished drawing.
+function scrollToNewest() {
   logEl.scrollTop = logEl.scrollHeight;
+  requestAnimationFrame(() => { logEl.scrollTop = logEl.scrollHeight; });
 }
 
 // ---------------------------------------------------------------------- the Mac
@@ -1666,7 +1679,7 @@ function splitFrontEnd() {
         toldAboutTheNewPage = true;
         log("a newer page is ready — say \"load the new page\" when you can", "work");
       }
-      log(text.slice(0, 400));
+      log(text);
       sound.note("ready");
       mouth?.speak(text);
       if (endsWithAQuestion(text)) {
@@ -1870,7 +1883,7 @@ function realtimeFrontEnd() {
       return;
     }
     if (kind === "final") {
-      log(text.slice(0, 400));
+      log(text);
       speakThrough(
         `[Claude has finished and this is its answer. Speak it to the user following your speaking rules — ` +
         `plain words, no code, lead with the outcome, findings one at a time. Do not read it verbatim.\n\n${text}]`
