@@ -85,6 +85,12 @@ if (SPEAKER === "mac" && speaker !== "mac") {
   console.log(`Falling back to the phone's own voice for now.\n`);
 }
 
+// The moment the phone's page was last written. The phone knows the one it is
+// running, so the two can be compared and a stale page can say so — half of this
+// system runs in the browser, and restarting the Mac side does nothing for it.
+const pageStamp = () =>
+  fs.statSync(path.join(root, "web", "index.html")).mtime.toISOString().slice(5, 16).replace("T", " ");
+
 // -------------------------------------------------------------- starting again
 //
 // The app is changed by talking to it now, and a change to its own code means
@@ -224,7 +230,7 @@ async function handle(req, res) {
     // A phone holding on to yesterday's page and a genuine bug look identical from
     // the driver's seat, and one of them wastes an afternoon. So it is never cached,
     // and the page carries the moment it was written so both ends can see which it is.
-    const stamp = fs.statSync(file).mtime.toISOString().slice(5, 16).replace("T", " ");
+    const stamp = pageStamp();
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store, must-revalidate",
@@ -248,6 +254,7 @@ async function handle(req, res) {
       speaker,
       speakerVoice: SPEAKER_VOICE,
       speakerRate: SPEAKER_RATE,
+      page: pageStamp(),
       gate: GATE,
       pause: PAUSE_MS,
       phrases: PHRASES,

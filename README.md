@@ -45,6 +45,13 @@ means stay down, which is what Ctrl-C and being killed do; asking to be started 
 underneath changed; falling over means start again, more slowly each time, because a crash loop that
 restarts instantly hides the crash.
 
+Half of this system runs in the browser, and restarting the Mac does nothing for that half. So the
+Mac says which page it now has, and the phone notices when it is running an older one. An idle page
+reloads at once. A page mid-drive says so and waits, because an iPhone only lets a page make sound
+through a channel opened by a tap—and a reload closes it. Being struck silent at seventy miles an
+hour is worse than running yesterday's code for another minute. Say **"load the new page"** when you
+are somewhere you can tap. The question in progress is carried across.
+
 It restarts itself when its own code changes, but never while Claude is working—interrupting an
 answer to pick up an edit is a poor trade. Say **"start yourself again"** to force it. The phone
 rides it out and says what is happening, because otherwise a restart looks exactly like the thing

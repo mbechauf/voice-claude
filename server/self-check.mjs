@@ -161,6 +161,8 @@ function checkTheGate(livePhrases) {
     // not a project, so the page puts every word back into the question.
     ["work on inside an ordinary question", ["can you work on the login bug"], "PROJECT | the login bug"],
     ["a command at the front counts", ["all done"], "SEND"],
+    ["a short word that merely sounds alike is not a command", ["can you help me with this test"], "can you help me with this test"],
+    ["taking a newer page", ["load the new page"], "UPDATE"],
     ["asked politely still counts", ["can you switch to the claude voice app"], "PROJECT | the claude voice app"],
     ["asked very politely", ["ok so could you please switch to the voice app"], "PROJECT | the voice app"],
     ["politeness is not passed on to claude", ["can you all done"], "SEND"],

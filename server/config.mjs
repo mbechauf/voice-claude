@@ -186,6 +186,10 @@ export const PHRASES = {
   // worked on is this app; otherwise there is nothing new to pick up.
   restart: ["start yourself again", "restart yourself", "pick that up", "reload yourself"],
 
+  // Take a newer version of the phone's page. Offered rather than forced, because
+  // loading it costs the sound channel until you tap.
+  update: ["load the new page", "take the new page", "update the page"],
+
   // Say what all of these are. Answered by the phone itself, out of the list below —
   // it never goes to Claude, because the one moment you cannot remember a command is
   // the worst moment to wait a minute for an answer.
@@ -209,6 +213,7 @@ export const WHAT_EACH_DOES = {
   project: "change what we are working on — say work on, then the project",
   where: "say which project we are on",
   restart: "start the app again, to pick up code that just changed",
+  update: "load a newer version of this page, when one is waiting",
 };
 
 // ------------------------------------------------- answering a question it asked

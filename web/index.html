@@ -112,7 +112,44 @@ function trace(what, detail = "") {
   }).catch(() => {});
 }
 
-trace("page loaded", document.getElementById("version").textContent);
+const myVersion = document.getElementById("version").textContent;
+trace("page loaded", myVersion);
+
+// The other half of this system runs here, in the browser, and restarting the Mac
+// does nothing for it. So the Mac says which page it now has, and this one notices
+// when it is out of date.
+//
+// Reloading is not free: an iPhone only lets a page make sound through a channel
+// opened by a tap, and a reload closes it. So a page that is idle reloads at once,
+// and a page mid-drive says so and waits — being silently struck dumb at seventy
+// miles an hour is far worse than running yesterday's code for another minute.
+let newPageWaiting = false;
+
+// The question in progress is kept across the reload, because losing two minutes of
+// assembled words to a version bump would be its own small betrayal.
+const KEPT = "voice-claude-question";
+
+async function checkForANewPage({ reloadIfIdle }) {
+  try {
+    const now = await (await fetch("/setup")).json();
+    if (!now.page || now.page === myVersion) return false;
+
+    trace("NEW PAGE WAITING", `${myVersion} -> ${now.page}`);
+    newPageWaiting = true;
+    if (reloadIfIdle) loadTheNewPage();
+    return true;
+  } catch {
+    return false;   // the Mac is still coming back up; ask again next time
+  }
+}
+
+function loadTheNewPage(keep = "") {
+  try {
+    if (keep) sessionStorage.setItem(KEPT, keep);
+  } catch {}
+  trace("LOADING THE NEW PAGE");
+  location.reload();
+}
 
 const stopWork = () => fetch("/stop", { method: "POST" }).catch(() => {});
 const forgetDrive = () => fetch("/new", { method: "POST" }).catch(() => {});
@@ -137,7 +174,12 @@ function listenForResults(handle) {
     handle(kind, text);
   };
   results.onerror = () => setState("lost the link to the Mac — retrying");
-  results.addEventListener?.("open", () => trace("link to the Mac is back"));
+  results.addEventListener?.("open", () => {
+    trace("link to the Mac is back");
+    // It has just come back, which usually means it restarted, which usually means
+    // something changed — possibly this page.
+    checkForANewPage({ reloadIfIdle: !running });
+  });
 }
 
 // -------------------------------------------------------------- the phone's ears
@@ -492,7 +534,13 @@ function howItSounds(word) {
 // rest can be given the benefit of the doubt without opening the floodgates.
 function nearlySame(heard, wanted, leniently = false) {
   if (heard === wanted) return true;
-  if (wanted.length > 3 && howItSounds(heard) === howItSounds(wanted)) return true;
+  // Sound alone is only trustworthy when there is enough sound to go on. Dropping
+  // the vowels leaves "this" and "take" identical, which had "this test" waiting to
+  // become "take the new page" in the middle of an ordinary sentence. Three sounds
+  // is enough to be a name — "claude", "cloud", "clot" and "cold" all share theirs —
+  // and two is not enough to be anything.
+  const itsSound = howItSounds(wanted);
+  if (wanted.length > 3 && itsSound.length >= 3 && howItSounds(heard) === itsSound) return true;
 
   // "stop" comes back as "stopped", "stopping". The word is in there.
   if (wanted.length >= 3 && heard.startsWith(wanted)) return true;
@@ -985,6 +1033,7 @@ function splitFrontEnd() {
   // the answer is not to guess better but to make guessing wrong cost nothing.
   // Taking it back puts the words straight back.
   let lastEmptied = [];
+  let toldAboutTheNewPage = false;
   let live = "";        // the words being said right this second, not settled yet
   let working = false;
   let ears = null;
@@ -1115,6 +1164,7 @@ function splitFrontEnd() {
     if (command === "forget") return forgetTheDrive();
     if (command === "where") return sayWhere();
     if (command === "restart") return startAppAgain();
+    if (command === "update") return takeTheNewPage();
     if (command === "project") { awaitingProject = spokenAs; return; }
     if (command === "help") return sayWhatYouCanSay();
   }
@@ -1347,6 +1397,18 @@ function splitFrontEnd() {
   // Changing this app's code by talking to it does nothing until it starts again,
   // and there is nobody at the keyboard to do it. It comes back on its own; the page
   // simply waits, because the link to the Mac reconnects by itself.
+  // Loading the new page costs the sound channel, so it is never done to you while
+  // you are mid-drive — it is offered, and you take it when you are ready.
+  function takeTheNewPage() {
+    if (!newPageWaiting) {
+      mouth?.speak("There is no new page waiting. This is the current one.");
+      return;
+    }
+    mouth?.speak("Loading it. Tap the button once to get my voice back.");
+    // Long enough to be heard, since the page is about to be replaced mid-sentence.
+    setTimeout(() => loadTheNewPage(question.join(" ")), 3_500);
+  }
+
   async function startAppAgain() {
     mouth?.silence();
     mouth?.speak("Starting again.");
@@ -1555,6 +1617,10 @@ function splitFrontEnd() {
     if (kind === "final") {
       working = false;
       stopTicking();
+      if (newPageWaiting && !toldAboutTheNewPage) {
+        toldAboutTheNewPage = true;
+        log("a newer page is ready — say \"load the new page\" when you can", "work");
+      }
       log(text.slice(0, 400));
       sound.note("ready");
       mouth?.speak(text);
@@ -1592,6 +1658,16 @@ function splitFrontEnd() {
       listenForResults(fromClaude);
       ears.start();
       goBtn.disabled = false;
+
+      // Whatever was being said when the page was replaced under it.
+      try {
+        const kept = sessionStorage.getItem(KEPT);
+        if (kept) {
+          sessionStorage.removeItem(KEPT);
+          question = [kept];
+          log(`carried over: ${kept}`, "work");
+        }
+      } catch {}
       show();
       idleState();
       const firstWording = (name) => [setup.phrases?.[name]].flat()[0];
