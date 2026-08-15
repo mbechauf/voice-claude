@@ -38,6 +38,18 @@ npm run voice:install   # once: sets up the voice. Free to install, free to use.
 npm start
 ```
 
+`npm start` keeps it up. That is not about crashes: the app is changed by talking to it now, and a
+change to its own code means nothing until it starts again—with nobody at the keyboard to do it. So
+it says on the way out how it wants to be treated, and the loop obeys. Leaving with nothing to say
+means stay down, which is what Ctrl-C and being killed do; asking to be started again means the code
+underneath changed; falling over means start again, more slowly each time, because a crash loop that
+restarts instantly hides the crash.
+
+It restarts itself when its own code changes, but never while Claude is working—interrupting an
+answer to pick up an edit is a poor trade. Say **"start yourself again"** to force it. The phone
+rides it out and says what is happening, because otherwise a restart looks exactly like the thing
+breaking. Set `VOICE_CLAUDE_WATCH=off` to only ever restart when asked.
+
 `npm run voice:install` needs Homebrew, and installs an older Python and some pronunciation data
 alongside the voice itself. If the voice is missing when the server starts, it says so and falls
 back to the phone's own rather than leaving you with silence in a car.

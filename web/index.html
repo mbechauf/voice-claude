@@ -92,6 +92,7 @@ function log(text, cls = "") {
 
 let results = null;
 let lastAnswer = "";
+let wasRestarting = false;
 
 function ask(request) {
   return fetch("/ask", {
@@ -122,9 +123,21 @@ function listenForResults(handle) {
   results.onmessage = (message) => {
     const { kind, text } = JSON.parse(message.data);
     if (kind === "final") lastAnswer = text;
+
+    // It is about to disappear for a second and come back with new code. Say so,
+    // because otherwise this looks exactly like the thing breaking.
+    if (kind === "restarting") {
+      trace("SERVER RESTARTING", text);
+      log(`the app is restarting — ${text}`, "work");
+      setState("restarting…");
+      wasRestarting = true;
+      return;
+    }
+
     handle(kind, text);
   };
   results.onerror = () => setState("lost the link to the Mac — retrying");
+  results.addEventListener?.("open", () => trace("link to the Mac is back"));
 }
 
 // -------------------------------------------------------------- the phone's ears
@@ -1101,6 +1114,7 @@ function splitFrontEnd() {
     if (command === "undo") return dropLast();
     if (command === "forget") return forgetTheDrive();
     if (command === "where") return sayWhere();
+    if (command === "restart") return startAppAgain();
     if (command === "project") { awaitingProject = spokenAs; return; }
     if (command === "help") return sayWhatYouCanSay();
   }
@@ -1328,6 +1342,24 @@ function splitFrontEnd() {
     }
 
     return null;
+  }
+
+  // Changing this app's code by talking to it does nothing until it starts again,
+  // and there is nobody at the keyboard to do it. It comes back on its own; the page
+  // simply waits, because the link to the Mac reconnects by itself.
+  async function startAppAgain() {
+    mouth?.silence();
+    mouth?.speak("Starting again.");
+    trace("ASKED FOR A RESTART");
+    try {
+      await fetch("/restart", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ why: "asked out loud" }),
+      });
+    } catch {
+      // It went down before it could answer, which is exactly what was asked for.
+    }
   }
 
   function sayWhere() {

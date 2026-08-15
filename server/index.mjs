@@ -32,7 +32,7 @@ import {
   VOICE_NAME,
   WHAT_EACH_DOES,
 } from "./config.mjs";
-import { forgetConversation, startWork, stopWork } from "./claude-bridge.mjs";
+import { forgetConversation, isBusy, startWork, stopWork } from "./claude-bridge.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 
 // ------------------------------------------------------------- what we are on
@@ -83,6 +83,64 @@ const speaker = SPEAKER === "mac" && !macVoiceInstalled() ? "device" : SPEAKER;
 if (SPEAKER === "mac" && speaker !== "mac") {
   console.log(`The good voice isn't installed yet — run "npm run voice:install".`);
   console.log(`Falling back to the phone's own voice for now.\n`);
+}
+
+// -------------------------------------------------------------- starting again
+//
+// The app is changed by talking to it now, and a change to its own code means
+// nothing until it starts again. There is nobody at the keyboard to do that, so it
+// asks: it exits with a code the script outside understands, and that script starts
+// it afresh. Exiting rather than reloading in place is the point — a process that
+// replaces its own code while running keeps the old version in memory, which is
+// exactly the confusion this is meant to end.
+const RESTART = 75;
+
+let restarting = false;
+
+// Ctrl-C, or being killed, means a person wants it to stop — so it leaves the way
+// the script outside reads as "stay down". Without this, the loop faithfully starts
+// it again and the app cannot be stopped at all, which is the obvious way to build
+// something that keeps itself alive and the wrong one.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    console.log(`\nstopping.`);
+    process.exit(0);
+  });
+}
+
+function startAgain(why) {
+  if (restarting) return;
+  restarting = true;
+  console.log(`\n== starting again: ${why}`);
+  broadcast("restarting", why);
+  // Let the phone hear about it before the connection dies under it.
+  setTimeout(() => process.exit(RESTART), 250);
+}
+
+// Its own code changing underneath it. Only while nothing is running — interrupting
+// Claude mid-answer to pick up a change is a poor trade — and only after things have
+// been quiet for a moment, because an edit arrives as a flurry of small writes.
+function watchOwnCode() {
+  if (process.env.VOICE_CLAUDE_WATCH === "off") return;
+
+  let settle = null;
+  const changed = (file) => {
+    if (!file || restarting) return;
+    if (!/\.(mjs|js|html|py)$/.test(file)) return;
+    clearTimeout(settle);
+    settle = setTimeout(() => {
+      if (isBusy()) { settle = setTimeout(() => changed(file), 5_000); return; }
+      startAgain(`${file} changed`);
+    }, 1_500);
+  };
+
+  for (const dir of ["server", "web", "scripts"]) {
+    try {
+      fs.watch(path.join(root, dir), { recursive: true }, (_, file) => changed(file));
+    } catch (err) {
+      console.error(`couldn't watch ${dir}: ${err.message}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- listeners
@@ -306,6 +364,14 @@ async function handle(req, res) {
     return send(res, 200, { project: nameOf(project), at: project, projects: Object.keys(PROJECTS) });
   }
 
+  // Asked for out loud, or by whatever just changed the code.
+  if (url.pathname === "/restart" && req.method === "POST") {
+    const { why } = await readBody(req);
+    send(res, 200, { restarting: true });
+    startAgain(why || "asked to");
+    return;
+  }
+
   // Start the drive over. In realtime mode this happens as a side effect of asking
   // for a fresh credential; in split mode there is no credential, so it is its own
   // request.
@@ -428,4 +494,5 @@ server.listen(PORT, () => {
   console.log(`\nOpen this on the phone:`);
   for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
   console.log(`\nSafari will warn about the certificate the first time. Accept it.\n`);
+  watchOwnCode();
 });
