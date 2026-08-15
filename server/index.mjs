@@ -158,10 +158,17 @@ const trace = [];
 // shown here. Over the network it needs a command nobody should be handing out; as
 // a file, whatever is working on this app can simply read it. Ignored by version
 // control, and it never leaves the machine.
+//
+// It is added to, never replaced. It used to start empty on every run, which was
+// harmless until the app began restarting itself whenever its code changed — and
+// then every real sentence anyone had said was being thrown away several times an
+// hour. Those sentences are the only honest record of how people actually talk to
+// this thing, and they are what any better way of understanding them will be judged
+// against. They are worth more than the disk they sit on.
 const TRACE_FILE = path.join(root, ".voice-claude", "trace.log");
 try {
   fs.mkdirSync(path.dirname(TRACE_FILE), { recursive: true });
-  fs.writeFileSync(TRACE_FILE, `-- started ${new Date().toISOString()}\n`);
+  fs.appendFileSync(TRACE_FILE, `\n-- started ${new Date().toISOString()}\n`);
 } catch (err) {
   console.error(`couldn't open the log: ${err.message}`);
 }

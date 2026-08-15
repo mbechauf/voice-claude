@@ -1,0 +1,93 @@
+{"_": "What people actually said, and what they actually meant. Real sentences first — every one of these was really said to this thing, most of them while it was getting them wrong. This is the set any better way of understanding speech has to beat, and the negatives matter more than the positives: anything can recognise 'all done', and the whole difficulty is not firing on a sentence that merely sounds like it."}
+{"_": "meant: the command it should be taken as, or none if it is content for Claude. said: exactly as dictation delivered it, mangling and all."}
+
+{"said": "all done", "meant": "send", "from": "real"}
+{"said": "that's it", "meant": "send", "from": "real"}
+{"said": "over to you", "meant": "send", "from": "real"}
+{"said": "off you go", "meant": "send"}
+{"said": "check the tests all done", "meant": "send", "from": "real"}
+{"said": "so can we look at the last change over to you", "meant": "send"}
+{"said": "yeah that's it", "meant": "send"}
+{"said": "ok that's it thanks", "meant": "send"}
+
+{"said": "read prompt", "meant": "read", "from": "real"}
+{"said": "rep prompt", "meant": "read", "from": "real", "note": "what dictation makes of read prompt"}
+{"said": "read it back", "meant": "read"}
+{"said": "read that back to me", "meant": "read"}
+{"said": "say it back", "meant": "read"}
+{"said": "can you read back what i've said so far", "meant": "read"}
+{"said": "what have i said so far", "meant": "read"}
+
+{"said": "take that back", "meant": "undo"}
+{"said": "delete last", "meant": "undo"}
+{"said": "scratch last", "meant": "undo"}
+{"said": "no take that back", "meant": "undo"}
+{"said": "delete the last sentence", "meant": "undo"}
+
+{"said": "scratch that", "meant": "wipe"}
+{"said": "start again", "meant": "wipe"}
+{"said": "no i meant something else scratch that", "meant": "wipe"}
+{"said": "wipe that and let me start over", "meant": "wipe"}
+
+{"said": "fresh start", "meant": "forget"}
+{"said": "forget everything", "meant": "forget"}
+
+{"said": "what can i say", "meant": "help"}
+{"said": "help me out", "meant": "help"}
+{"said": "say the commands", "meant": "help"}
+{"said": "can i get some help", "meant": "help", "note": "the paraphrase problem: none of these are in the wording list"}
+{"said": "can i get help", "meant": "help"}
+{"said": "can i please get some help", "meant": "help"}
+{"said": "what are the commands again", "meant": "help"}
+{"said": "i've forgotten what i can say", "meant": "help"}
+
+{"said": "work on the voice app", "meant": "project"}
+{"said": "can you switch to the claude voice app", "meant": "project", "from": "real"}
+{"said": "can you switch over to the clot voice app", "meant": "project", "from": "real", "note": "claude arrives as clot"}
+{"said": "so can we start working on the voice claude app", "meant": "project", "from": "real"}
+{"said": "ok so could you please switch to the voice app", "meant": "project"}
+{"said": "let's do the advisor app now", "meant": "project"}
+{"said": "back to the advisor", "meant": "project"}
+
+{"said": "what project are we on", "meant": "where"}
+{"said": "which project is this", "meant": "where"}
+{"said": "what's the project we're working on right now", "meant": "where", "from": "real", "note": "sent to Claude as a question; arguably either"}
+
+{"said": "start yourself again", "meant": "restart"}
+{"said": "pick that up", "meant": "restart"}
+{"said": "load the new page", "meant": "update"}
+
+{"_": "And now the ones that must not fire. These are the whole point."}
+
+{"said": "does it send it to the server", "meant": "none", "from": "real", "note": "read as an instruction once"}
+{"said": "can you work on the login bug", "meant": "none"}
+{"said": "can you help me with this test", "meant": "none", "from": "real", "note": "about help, but not asking for help"}
+{"said": "are all the tests passing", "meant": "none"}
+{"said": "is the migration done yet", "meant": "none"}
+{"said": "are all the migrations done", "meant": "none"}
+{"said": "can it read the prompt file", "meant": "none"}
+{"said": "read the tests and tell me what they cover", "meant": "none"}
+{"said": "delete the old migration file", "meant": "none"}
+{"said": "put the old version back", "meant": "none"}
+{"said": "can you roll that back for me", "meant": "none"}
+{"said": "how do i start the server", "meant": "none"}
+{"said": "it said all done and then stopped", "meant": "none"}
+{"said": "the help text is out of date", "meant": "none"}
+{"said": "why does it keep starting again", "meant": "none"}
+{"said": "which project does that setting belong to", "meant": "none"}
+
+{"_": "Real speech from real drives. Filler, swearing, false starts, and the word stop said six times while not meaning stop."}
+
+{"said": "hey are we on", "meant": "none", "from": "real"}
+{"said": "well let's see if it's working now", "meant": "none", "from": "real"}
+{"said": "ok is that working now", "meant": "none", "from": "real"}
+{"said": "what a piece of shit", "meant": "none", "from": "real"}
+{"said": "i don't know how this can be so hard", "meant": "none", "from": "real"}
+{"said": "testing", "meant": "none", "from": "real"}
+{"said": "not what it's saying it's", "meant": "none", "from": "real"}
+{"said": "well a bit that's working", "meant": "none", "from": "real", "note": "contains that's, nearly that's it"}
+{"said": "can we try not another yes no answer", "meant": "none", "from": "real"}
+{"said": "jesus ok stop stop stop stop stop hang on no no no no well let's fix this permission issue", "meant": "none", "from": "real", "note": "stop five times, none of them the command"}
+{"said": "no but i'm not i'm i'm not driving we're basically preparing this for to drive", "meant": "none", "from": "real"}
+{"said": "i know that's silly no no no come on", "meant": "none", "from": "real"}
+{"said": "um let's see i think that's roughly right", "meant": "none"}

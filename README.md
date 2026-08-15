@@ -202,6 +202,22 @@ that it should stop and say so rather than reach into a neighbouring one.
 counts as changing project if what follows actually names one of yours. If it does not, both halves
 go back into the question exactly as spoken.
 
+### How well does it understand you?
+
+```bash
+npm run score
+```
+
+Runs the matching against every sentence anyone has really said to it, plus the awkward cases, and
+says what it gets right and wrong. Today: **84%**, with two sentences firing when they should not and
+ten it does not understand. That is the ceiling of matching on words—adding wordings for the ten
+makes the two worse—and it is the number #8 has to beat.
+
+The sentences live in `data/what-was-meant.jsonl`, with the ones really said out loud marked. The
+negatives are the valuable half: anything can recognise "all done", and the whole difficulty is not
+firing on a sentence that merely sounds like it. `.voice-claude/trace.log` keeps every sentence the
+phone hears, which is where more of them come from.
+
 ### Checking it still works
 
 ```bash
