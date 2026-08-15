@@ -14,6 +14,7 @@
   }
   header { padding: 1.25rem 0 0.5rem; }
   h1 { font-size: 1.1rem; margin: 0; font-weight: 600; letter-spacing: 0.01em; }
+  #version { color: #6b675e; font-weight: 400; font-size: 0.8rem; }
   #state { color: #9b968a; font-size: 0.9rem; margin-top: 0.25rem; }
   button {
     font: inherit; font-size: 1.35rem; font-weight: 600;
@@ -23,6 +24,25 @@
   }
   button.live { background: #3a3a32; }
   button:disabled { opacity: 0.5; }
+  /* Open: it is taking down what you say. Visible at a glance, no reading needed. */
+  button.open { background: #3f6b4a; }
+  /* While it is talking the whole button becomes a way to shut it up, because that
+     is the one thing you want within reach without aiming. */
+  button.talking { background: #5a4030; }
+  /* The question being built, in full, always. Nothing in here ever disappears on
+     its own — it goes when you send it, and not before. */
+  #prompt {
+    min-height: 5.5rem; max-height: 40dvh; overflow-y: auto;
+    font-size: 1.15rem; line-height: 1.45; color: #f0ece2;
+    background: #1c1c16; border: 1px solid #2e2e26; border-radius: 0.75rem;
+    padding: 0.75rem; margin: 0.25rem 0;
+  }
+  #prompt:empty::before { content: "nothing yet — just talk"; color: #6b675e; }
+  #prompt .live { color: #9b968a; }
+  #end {
+    background: none; border: 0; color: #6b675e; font-size: 0.85rem;
+    width: auto; padding: 0.5rem 0; margin: 0; text-decoration: underline;
+  }
   #log {
     flex: 1; overflow-y: auto; font-size: 0.9rem;
     border-top: 1px solid #2e2e26; padding-top: 0.75rem; margin-top: 0.25rem;
@@ -35,37 +55,25 @@
 </head>
 <body>
 <header>
-  <h1>voice-claude</h1>
+  <h1>voice-claude <span id="version">__VERSION__</span></h1>
   <div id="state">not connected</div>
 </header>
 
-<button id="go">Start talking</button>
+<div id="prompt"></div>
 
+<button id="go">Start talking</button>
+<button id="end" hidden>end session</button>
 <div id="log"></div>
 
 <script type="module">
 const stateEl = document.getElementById("state");
+const promptEl = document.getElementById("prompt");
 const logEl = document.getElementById("log");
 const goBtn = document.getElementById("go");
+const endBtn = document.getElementById("end");
 
-let pc = null, dc = null, events = null, live = false;
-let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = null;
-let lastSpokeAt = 0;
-const PROGRESS_MIN_GAP_MS = 25_000;
+const setup = await (await fetch("/setup")).json();
 
-// Every time you speak, the whole conversation so far is billed again, so a long
-// drive gets steadily more expensive. The voice model is only a mouthpiece —
-// everything that matters is remembered by Claude on the Mac — so we throw away
-// its older turns and keep the cost flat. Nothing real is lost.
-const KEEP_TURNS = 10;
-const itemIds = [];
-
-function trimConversation() {
-  while (itemIds.length > KEEP_TURNS) {
-    const oldest = itemIds.shift();
-    sendEvent({ type: "conversation.item.delete", item_id: oldest });
-  }
-}
 
 function setState(text) { stateEl.textContent = text; }
 
@@ -77,116 +85,1736 @@ function log(text, cls = "") {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ---------------------------------------------------------- talking to the voice
+// ---------------------------------------------------------------------- the Mac
+//
+// Everything below this line is the same whichever voice layer is in use: work goes
+// to the Mac, and answers come back from it on their own.
 
-function sendEvent(obj) {
-  if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
-}
+let results = null;
+let lastAnswer = "";
+let wasRestarting = false;
 
-// Put something in front of the voice model and have it speak.
-function speakThrough(note) {
-  sendEvent({
-    type: "conversation.item.create",
-    item: { type: "message", role: "user", content: [{ type: "input_text", text: note }] },
-  });
-  sendEvent({ type: "response.create" });
-  lastSpokeAt = Date.now();
-}
-
-const TOOLS = [
-  {
-    type: "function",
-    name: "ask_claude",
-    description:
-      "Hand a request to Claude, which reads and reasons about the user's real code on their machine. " +
-      "Use this for ANY question or instruction about their code, project, tests, commits, or tools — " +
-      "you have no knowledge of these yourself. Returns immediately; the answer arrives later and you " +
-      "will be told to speak it.",
-    parameters: {
-      type: "object",
-      properties: {
-        request: {
-          type: "string",
-          description:
-            "What the user wants, in full, as an instruction to a capable engineer. Include anything " +
-            "from earlier in the conversation that is needed to make sense of it on its own.",
-        },
-      },
-      required: ["request"],
-    },
-  },
-  {
-    type: "function",
-    name: "stop_claude",
-    description: "Stop whatever Claude is currently doing. Use when the user says stop.",
-    parameters: { type: "object", properties: {} },
-  },
-];
-
-async function configureSession() {
-  instructionsCache ??= await (await fetch("/instructions")).text();
-  const instructions = instructionsCache;
-  sendEvent({
-    type: "session.update",
-    session: {
-      type: "realtime",
-      instructions,
-      tools: TOOLS,
-      tool_choice: "auto",
-    },
+function ask(request) {
+  return fetch("/ask", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request }),
   });
 }
 
-function answerTool(callId, output) {
-  sendEvent({
-    type: "conversation.item.create",
-    item: { type: "function_call_output", call_id: callId, output },
-  });
-  sendEvent({ type: "response.create" });
-  lastSpokeAt = Date.now();
+// Say what is happening back to the Mac. Nothing here waits for an answer, and a
+// failed note is never worth a word to the driver.
+function trace(what, detail = "") {
+  fetch("/trace", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ what, detail: String(detail).slice(0, 200) }),
+  }).catch(() => {});
 }
 
-async function onVoiceEvent(event) {
-  switch (event.type) {
-    case "response.function_call_arguments.done": {
-      const args = JSON.parse(event.arguments || "{}");
-      if (event.name === "ask_claude") {
-        log(`you: ${args.request}`, "you");
-        await fetch("/ask", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ request: args.request }),
-        });
-        answerTool(event.call_id, "Started. Say one short sentence to acknowledge, then wait quietly.");
-      } else if (event.name === "stop_claude") {
-        await fetch("/stop", { method: "POST" });
-        log("stopped", "work");
-        answerTool(event.call_id, "Stopped.");
-      }
-      break;
-    }
-    case "conversation.item.created":
-    case "conversation.item.added":
-      if (event.item?.id) itemIds.push(event.item.id);
-      break;
+const myVersion = document.getElementById("version").textContent;
+trace("page loaded", myVersion);
 
-    case "response.done":
-      lastSpokeAt = Date.now();
-      trimConversation(); // only between turns, never mid-sentence
-      break;
-    case "error":
-      log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
-      break;
+// The other half of this system runs here, in the browser, and restarting the Mac
+// does nothing for it. So the Mac says which page it now has, and this one notices
+// when it is out of date.
+//
+// Reloading is not free: an iPhone only lets a page make sound through a channel
+// opened by a tap, and a reload closes it. So a page that is idle reloads at once,
+// and a page mid-drive says so and waits — being silently struck dumb at seventy
+// miles an hour is far worse than running yesterday's code for another minute.
+let newPageWaiting = false;
+
+// The question in progress is kept across the reload, because losing two minutes of
+// assembled words to a version bump would be its own small betrayal.
+const KEPT = "voice-claude-question";
+
+async function checkForANewPage({ reloadIfIdle }) {
+  try {
+    const now = await (await fetch("/setup")).json();
+    if (!now.page || now.page === myVersion) return false;
+
+    trace("NEW PAGE WAITING", `${myVersion} -> ${now.page}`);
+    newPageWaiting = true;
+    if (reloadIfIdle) loadTheNewPage();
+    return true;
+  } catch {
+    return false;   // the Mac is still coming back up; ask again next time
   }
 }
 
-// ------------------------------------------------------- results coming back
+function loadTheNewPage(keep = "") {
+  try {
+    if (keep) sessionStorage.setItem(KEPT, keep);
+  } catch {}
+  trace("LOADING THE NEW PAGE");
+  location.reload();
+}
 
-function listenForResults() {
-  events = new EventSource("/events");
-  events.onmessage = (message) => {
+const stopWork = () => fetch("/stop", { method: "POST" }).catch(() => {});
+const forgetDrive = () => fetch("/new", { method: "POST" }).catch(() => {});
+
+// `handle` is given ("progress" | "final" | "error", text) as Claude works.
+function listenForResults(handle) {
+  results = new EventSource("/events");
+  results.onmessage = (message) => {
     const { kind, text } = JSON.parse(message.data);
+    if (kind === "final") lastAnswer = text;
 
+    // It is about to disappear for a second and come back with new code. Say so,
+    // because otherwise this looks exactly like the thing breaking.
+    if (kind === "restarting") {
+      trace("SERVER RESTARTING", text);
+      log(`the app is restarting — ${text}`, "work");
+      setState("restarting…");
+      wasRestarting = true;
+      return;
+    }
+
+    handle(kind, text);
+  };
+  results.onerror = () => setState("lost the link to the Mac — retrying");
+  results.addEventListener?.("open", () => {
+    trace("link to the Mac is back");
+    // It has just come back, which usually means it restarted, which usually means
+    // something changed — possibly this page.
+    checkForANewPage({ reloadIfIdle: !running });
+  });
+}
+
+// -------------------------------------------------------------- the phone's ears
+//
+// The phone's own dictation. Free, and the audio never leaves it — only the words
+// come back. It stops listening on its own after a pause, so we start it again;
+// nothing here may ever need a tap at seventy miles an hour.
+
+function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
+  const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+  if (!Recognition) return null;
+
+  let recognition = null;
+  let wanted = false;
+  let restartTimer = null;
+  let inFlight = "";   // heard, but not yet confirmed by the phone
+
+  function build() {
+    const r = new Recognition();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = navigator.language || "en-US";
+
+    r.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = (result[0]?.transcript ?? "").trim();
+        if (!text) continue;
+        if (result.isFinal) {
+          trace("heard (settled)", text);
+          inFlight = "";
+          onHeard(text);
+        } else {
+          // Held on to, because the phone throws this away if it decides to stop
+          // listening before you have finished the sentence.
+          inFlight = text;
+          onHearing(text);
+          onPartialPhrase?.(text);
+        }
+      }
+    };
+
+    // The phone stops listening on its own after a couple of seconds of quiet, and
+    // when it does that it silently drops whatever it had half-heard. Pausing in the
+    // middle of a question would therefore lose the words you had just said, which
+    // looked exactly like it forgetting what you were talking about. So the half-
+    // heard words are kept and handed over here, and then it starts listening again.
+    r.onstart = () => trace("dictation started");
+    r.onend = () => {
+      trace("dictation stopped itself", inFlight ? `keeping "${inFlight}"` : "nothing in flight");
+      if (inFlight) {
+        const leftover = inFlight;
+        inFlight = "";
+        onHeard(leftover);
+      }
+      if (wanted) restart(120);
+    };
+    r.onerror = (event) => {
+      trace("dictation error", event.error);
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        wanted = false;
+        onTrouble("The phone won't give this page the microphone. Allow it in Safari's settings for this site.");
+        return;
+      }
+      if (event.error === "aborted" || event.error === "no-speech") return;
+      onTrouble(`dictation hiccup: ${event.error}`);
+    };
+    return r;
+  }
+
+  function restart(delay = 0) {
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => {
+      if (!wanted) return;
+      try {
+        recognition = build();
+        recognition.start();
+      } catch (err) {
+        trace("could not start dictation", err.message ?? err);
+        restart(800); // it was still shutting down; try again shortly
+      }
+    }, delay);
+  }
+
+  return {
+    start() { wanted = true; restart(0); },
+    stop() {
+      wanted = false;
+      clearTimeout(restartTimer);
+      try { recognition?.stop(); } catch {}
+      recognition = null;
+    },
+  };
+}
+
+// ------------------------------------------------------------ the phone's mouth
+//
+// The phone's own voices. Also free. Long answers are broken into sentences and
+// spoken one at a time, so that "stop" takes effect within a breath rather than at
+// the end of a paragraph, and so nothing hits the phone's limit on how much it will
+// say in one go.
+
+// The microphone stays open while it is talking, which means it also hears itself
+// coming back off the windscreen. Both voices therefore keep a note of the last few
+// sentences they have said, so that what is heard can be checked against what was
+// just spoken. That check is what makes it safe to be interrupted mid-sentence.
+function recentlySpoken(keep = 3) {
+  const said = [];
+  return {
+    add(sentence) {
+      said.push(sentence);
+      while (said.length > keep) said.shift();
+    },
+    get text() { return said.join(" "); },
+  };
+}
+
+// Its own voice coming back is mostly its own words. Yours are not.
+function soundsLikeItself(heard, spoken) {
+  if (!spoken) return false;
+  const meaningfulWords = (text) =>
+    text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
+
+  const its = new Set(meaningfulWords(spoken));
+  const mine = meaningfulWords(heard);
+  // Nothing distinctive was said, and it is mid-sentence: far likelier to be the
+  // echo than a real instruction, and a wrongly ignored "mm" costs nothing.
+  if (!mine.length) return true;
+
+  const shared = mine.filter((word) => its.has(word)).length;
+  return shared / mine.length >= 0.5;
+}
+
+// Both voices read the same way: sentence by sentence, so that "stop" takes effect
+// within a breath rather than at the end of a paragraph, and so nothing hits the
+// limit on how much a phone will say in one go.
+function intoSentences(text) {
+  const clean = text
+    .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
+    .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
+    .replace(/\s+/g, " ")
+    .trim();
+  const parts = [];
+  for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
+    // A very long sentence still has to be broken somewhere, or it gets cut off.
+    if (sentence.length <= 220) { if (sentence) parts.push(sentence); continue; }
+    let rest = sentence;
+    while (rest.length > 220) {
+      const cut = rest.lastIndexOf(" ", 220);
+      parts.push(rest.slice(0, cut > 60 ? cut : 220));
+      rest = rest.slice(cut > 60 ? cut : 220).trim();
+    }
+    if (rest) parts.push(rest);
+  }
+  return parts;
+}
+
+function deviceMouth({ voiceName, rate, onStart, onFinish }) {
+  const synth = window.speechSynthesis;
+  if (!synth) return null;
+
+  let queue = [];
+  let speaking = false;
+  let chosen = null;
+  const spoken = recentlySpoken();
+
+  function pickVoice() {
+    const voices = synth.getVoices();
+    if (!voices.length) return null;
+    const wanted = (voiceName ?? "").toLowerCase();
+    if (wanted) {
+      const match = voices.find((v) => v.name.toLowerCase().includes(wanted));
+      if (match) return match;
+    }
+    const language = (navigator.language || "en-US").slice(0, 2);
+    // Prefer a voice that lives on the phone: no network, no delay, no cost.
+    return (
+      voices.find((v) => v.lang.startsWith(language) && v.localService) ??
+      voices.find((v) => v.lang.startsWith(language)) ??
+      voices[0]
+    );
+  }
+
+  // The list of voices arrives late on some phones, so ask again when it changes.
+  synth.addEventListener?.("voiceschanged", () => { chosen = pickVoice(); });
+  chosen = pickVoice();
+
+  function next() {
+    if (!queue.length) {
+      speaking = false;
+      onFinish?.();
+      return;
+    }
+    const sentence = queue.shift();
+    spoken.add(sentence);
+    const utterance = new SpeechSynthesisUtterance(sentence);
+    if (chosen) utterance.voice = chosen;
+    utterance.rate = rate ?? 1;
+    utterance.onend = next;
+    utterance.onerror = next; // a failed sentence must not strand the rest
+    synth.speak(utterance);
+  }
+
+  return {
+    // iPhones stay silent unless the first sound was asked for by a tap, so this is
+    // called once from the Start button and the rest of the drive is hands-free.
+    unlock() {
+      const silent = new SpeechSynthesisUtterance(" ");
+      silent.volume = 0;
+      synth.speak(silent);
+    },
+    speak(text) {
+      const parts = intoSentences(text);
+      if (!parts.length) return;
+      queue = parts;
+      if (!speaking) {
+        speaking = true;
+        onStart?.();
+        next();
+      }
+    },
+    silence() {
+      queue = [];
+      synth.cancel();
+      if (speaking) { speaking = false; onFinish?.(); }
+    },
+    get busy() { return speaking; },
+    get saying() { return spoken.text; },
+  };
+}
+
+// --------------------------------------------------------------- the Mac's voice
+//
+// A proper voice, generated on the Mac and sent down here a sentence at a time. The
+// phone does no talking at all; it just plays what arrives. The next sentence is
+// fetched while the current one plays, so the pause is only ever before the first.
+
+function macMouth({ fallback, onStart, onFinish, onTrouble }) {
+  let speaking = false;
+  let abandoned = false;
+  const spoken = recentlySpoken();
+
+  async function fetchSound(sentence) {
+    const response = await fetch("/say", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: sentence }),
+    });
+    if (!response.ok) throw new Error(`the Mac couldn't say that (${response.status})`);
+    return response.arrayBuffer();
+  }
+
+  async function read(parts) {
+    let pending;
+    try {
+      pending = fetchSound(parts[0]);
+      await pending;
+    } catch (err) {
+      // The good voice is unreachable. Better a rough voice than silence in a car.
+      trace("voice unreachable", err.message ?? err);
+      onTrouble?.(String(err.message ?? err));
+      speaking = false;
+      fallback?.speak(parts.join(" "));
+      return;
+    }
+
+    for (let i = 0; i < parts.length; i += 1) {
+      let bytes;
+      try {
+        bytes = await pending;
+      } catch (err) {
+        onTrouble?.(String(err.message ?? err));
+        break;
+      }
+      if (abandoned || !bytes) break;
+
+      // Start making the next one while this one is being heard.
+      pending = i + 1 < parts.length ? fetchSound(parts[i + 1]).catch(() => null) : null;
+      spoken.add(parts[i]);
+      try {
+        trace("speaking", parts[i].slice(0, 60));
+        await sound.say(bytes);
+      } catch (err) {
+        // The channel refused it. Say it some other way rather than appearing to
+        // talk while making no sound, which is the worst of both.
+        trace("could not play", err.message ?? err);
+        onTrouble?.("The phone wouldn't play that, so its own voice is reading it.");
+        speaking = false;
+        fallback?.speak(parts.slice(i).join(" "));
+        return;
+      }
+      if (abandoned) break;
+    }
+
+    speaking = false;
+    onFinish?.();
+  }
+
+  return {
+    unlock() {
+      sound.wake();
+      fallback?.unlock();
+    },
+    speak(text) {
+      const parts = intoSentences(text);
+      if (!parts.length) return;
+      abandoned = false;
+      speaking = true;
+      onStart?.();
+      read(parts);
+    },
+    silence() {
+      abandoned = true;
+      sound.hush();
+      fallback?.silence();
+      if (speaking) { speaking = false; onFinish?.(); }
+    },
+    get busy() { return speaking || Boolean(fallback?.busy); },
+    get saying() { return [spoken.text, fallback?.saying ?? ""].join(" ").trim(); },
+  };
+}
+
+
+// ----------------------------------------------------------------------- the gate
+//
+// A car is full of talk that was never meant for the machine, and no amount of
+// cleverness reliably tells it apart from talk that was. So nothing is guessed:
+// one phrase opens the gate, another closes it, and only what was said in between
+// ever reaches Claude. Everything else is heard and thrown away.
+
+// Dictation mishears names constantly — "Claude" comes back as "cloud", "clawed",
+// "clod", "cold". Those are not spelling slips, they are the same sounds written
+// down differently, so they are compared by sound: keep the first letter, throw away
+// the vowels, and group letters made in the same part of the mouth. All four of
+// those collapse to the same handful of sounds, and so does whatever your accent
+// does to it on a bad day.
+function howItSounds(word) {
+  const groups = { b: 1, f: 1, p: 1, v: 1, c: 2, g: 2, j: 2, k: 2, q: 2, s: 2, x: 2, z: 2, d: 3, t: 3, l: 4, m: 5, n: 5, r: 6 };
+  let key = word[0] ?? "";
+  let previous = groups[word[0]] ?? 0;
+  for (const letter of word.slice(1)) {
+    const group = groups[letter] ?? 0;
+    if (group && group !== previous) key += group;
+    // Vowels break a run, so "collide" keeps both of its l-sounds; h and w do not.
+    if (letter !== "h" && letter !== "w") previous = group;
+  }
+  return key.slice(0, 4);
+}
+
+// `leniently` is only ever true for words after the first one in a phrase. The
+// first word is the anchor and has to be earned properly; once it has landed, the
+// rest can be given the benefit of the doubt without opening the floodgates.
+function nearlySame(heard, wanted, leniently = false) {
+  if (heard === wanted) return true;
+  // Sound alone is only trustworthy when there is enough sound to go on. Dropping
+  // the vowels leaves "this" and "take" identical, which had "this test" waiting to
+  // become "take the new page" in the middle of an ordinary sentence. Three sounds
+  // is enough to be a name — "claude", "cloud", "clot" and "cold" all share theirs —
+  // and two is not enough to be anything.
+  const itsSound = howItSounds(wanted);
+  if (wanted.length > 3 && itsSound.length >= 3 && howItSounds(heard) === itsSound) return true;
+
+  // "stop" comes back as "stopped", "stopping". The word is in there.
+  if (wanted.length >= 3 && heard.startsWith(wanted)) return true;
+
+  // Very short words carry almost no sound to match on, so "go" comes back as
+  // "girl", "goal", "gold" and there is no telling them apart.
+  if (leniently && wanted.length <= 3) {
+    return heard[0] === wanted[0] && heard.length <= wanted.length + 4;
+  }
+
+  // A two-letter anchor has nothing to spare: one slip turns "go" into "to", "so",
+  // "no" and "do", which read "does it send it to the server" as a command. Words
+  // that short have to be exactly right unless they come after the anchor.
+  if (!leniently && wanted.length <= 2) return false;
+
+  // Two slips is too many for the first word of a phrase either: it let "with this"
+  // be read as "switch to" mid-sentence. The anchor gets one slip and the sound test
+  // above; the rest, which only matter once the anchor has landed, keep the benefit
+  // of the doubt.
+  const allowed = wanted.length <= 5 || !leniently ? 1 : 2;
+  if (Math.abs(heard.length - wanted.length) > allowed) return false;
+
+  // How many single-letter changes turn one into the other.
+  let previous = Array.from({ length: wanted.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= heard.length; i += 1) {
+    const row = [i];
+    for (let j = 1; j <= wanted.length; j += 1) {
+      row[j] = Math.min(
+        previous[j] + 1,
+        row[j - 1] + 1,
+        previous[j - 1] + (heard[i - 1] === wanted[j - 1] ? 0 : 1),
+      );
+    }
+    previous = row;
+  }
+  return previous[wanted.length] <= allowed;
+}
+
+function phraseStartsAt(words, index, phrase) {
+  if (index + phrase.length > words.length) return false;
+  return phrase.every((wanted, offset) => nearlySame(words[index + offset], wanted, offset > 0));
+}
+
+const plainWords = (text) =>
+  text.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
+
+// Real speech is full of noise that carries no meaning: "um", "er", and the little
+// stalling phrases people say while they think. None of it belongs in a question,
+// and none of it should count towards deciding whether a thought is finished — "look
+// at the, um" is no more finished than "look at the".
+//
+// Two kinds, treated differently on purpose. The first are not words at all in any
+// sentence, so they come out wherever they appear. The second are ordinary words that
+// happen to be used as stalling — "you know the tests fail" means something — so they
+// only come out at the very start or the very end of a piece, where they are padding
+// rather than sense.
+const NOISES = ["um", "umm", "uh", "uhh", "er", "erm", "ah", "hmm", "mm", "mmm", "eh"];
+const STALLS = [
+  ["you", "know"], ["i", "mean"], ["let's", "see"], ["lets", "see"],
+  ["sort", "of"], ["kind", "of"], ["like", "i", "said"], ["well"], ["so"], ["like"],
+];
+
+// Keeps the words as they were said — casing, punctuation and all — and only takes
+// things out, so what is left reads exactly as it was spoken.
+function withoutFiller(text) {
+  const bare = (token) => token.toLowerCase().replace(/[^a-z0-9']/g, "");
+  let tokens = String(text ?? "").split(/\s+/).filter(Boolean);
+
+  tokens = tokens.filter((token) => {
+    const word = bare(token);
+    return word ? !NOISES.includes(word) : true;
+  });
+
+  // A stall at an end can be followed by another one — "well, you know, the tests" —
+  // so both ends are pared back for as long as something keeps coming off.
+  const matchesAt = (at, stall) =>
+    stall.every((wanted, offset) => bare(tokens[at + offset] ?? "") === wanted);
+
+  let trimming = true;
+  while (trimming && tokens.length) {
+    trimming = false;
+    for (const stall of STALLS) {
+      if (tokens.length >= stall.length && matchesAt(0, stall)) {
+        tokens = tokens.slice(stall.length);
+        trimming = true;
+        break;
+      }
+      if (tokens.length >= stall.length && matchesAt(tokens.length - stall.length, stall)) {
+        tokens = tokens.slice(0, tokens.length - stall.length);
+        trimming = true;
+        break;
+      }
+    }
+  }
+
+  // Taking words out can leave punctuation stranded at the front — ", the tests".
+  return tokens.join(" ").replace(/^[\s,;:.!?-]+/, "").trim();
+}
+
+// Words that cannot be the last word of anything. Not a list of sentences that count
+// as finished — there is no such list — but the other way round: English has a small
+// closed set of words whose whole job is to point at something that has not been said
+// yet. "Check the tests and" is unfinished because of "and", not because of anything
+// about tests. That is what makes this general rather than a set of patterns.
+const CANNOT_END = new Set([
+  // joining words, which promise another clause
+  "and", "or", "but", "so", "because", "if", "when", "while", "though", "although",
+  "unless", "until", "than", "whether", "that", "as", "since", "before", "after",
+  // pointing words, which promise a thing
+  "the", "a", "an", "my", "your", "our", "their", "its", "his", "her", "this",
+  "these", "those", "some", "any", "no", "every", "each", "another", "both",
+  // words that link to a thing, which promise the thing
+  "of", "to", "for", "with", "at", "in", "on", "from", "about", "into", "onto",
+  "over", "under", "between", "through", "across", "against", "without", "within",
+  "by", "up", "down", "off", "out", "near", "per", "via", "like",
+  // helper verbs, which promise the verb that matters
+  "is", "are", "was", "were", "am", "be", "been", "being", "do", "does", "did",
+  "have", "has", "had", "can", "could", "will", "would", "shall", "should", "may",
+  "might", "must", "let", "lets", "let's", "going", "want", "need", "try",
+  // question words dangling on their own
+  "what", "which", "who", "whom", "whose", "where", "how", "why",
+  // very common half-finished endings
+  "very", "more", "most", "just", "also", "not", "too", "quite", "really",
+]);
+
+/**
+ * Does this sound like a finished thought?
+ *
+ * Used at a pause, to decide whether it is worth offering to send. A pause on its own
+ * is a terrible signal — in a car a pause is someone thinking — but a pause after
+ * something that reads as a whole sentence is a good one.
+ *
+ * Deliberately cautious in one direction only. Saying "not finished" when it was
+ * finished costs nothing: the send phrase still works, exactly as it does today.
+ * Saying "finished" when it was not costs an interruption, so the test has to be able
+ * to say no.
+ */
+function soundsFinished(text) {
+  const raw = String(text ?? "").trim();
+  const words = plainWords(withoutFiller(raw));
+
+  // One word is an answer or a fragment, not a thought worth guessing about. Two is
+  // the shortest real question there is — "what changed", "any failures".
+  if (words.length < 2) return false;
+
+  // Dictation only writes a full stop or a question mark when it was actually spoken
+  // or clearly heard, so when one turns up at the end it settles the matter.
+  if (/[.?!]$/.test(raw) && !CANNOT_END.has(words[words.length - 1])) return true;
+
+  return !CANNOT_END.has(words[words.length - 1]);
+}
+
+/**
+ * Reads speech as it arrives and says what to do about it.
+ *
+ * The phone does not hand over sentences; it hands over whatever it had when you
+ * paused. Say "Claude" — pause — "stop", and those arrive as two separate pieces,
+ * which is why looking for the phrase inside each piece on its own found nothing and
+ * the words fell through as part of the question. So this keeps one running stream
+ * across every piece, and when the words at the end could still turn into a phrase
+ * once you finish saying it, it holds them back rather than committing them.
+ *
+ * Gives back {command: "send"} / {say: "..."} in the order they were spoken, so a
+ * whole question said in one breath behaves exactly like one said over three.
+ *
+ * It takes however many commands you give it — {send: "all done", ...} — because
+ * there was never anything special about there being two of them.
+ */
+// Words people put in front of an instruction without meaning anything by them.
+// "Can you switch to the voice app" is an instruction, not a sentence about
+// switching — but the words "can you" sit in front of it, so a command that only
+// counts at the very start does not count at all. These are skipped over when
+// deciding whether something was said at the front.
+const POLITENESS = new Set([
+  "can", "could", "would", "will", "please", "you", "we", "lets", "let's", "let",
+  "ok", "okay", "right", "now", "so", "and", "then", "hey", "just", "maybe",
+  "actually", "um", "uh", "er", "well", "i", "want", "need", "wanna", "like",
+]);
+
+function makePhraseReader(phrases) {
+  // Each command may have several wordings; any of them means the same thing.
+  // Longest first, so that when one wording begins like another the longer reading
+  // wins rather than the shorter one swallowing its first words.
+  const commands = Object.entries(phrases)
+    .flatMap(([name, said]) =>
+      (Array.isArray(said) ? said : [said]).map((phrase) => ({ name, words: plainWords(phrase) })))
+    .sort((a, b) => b.words.length - a.words.length);
+  let pending = [];
+
+  // Could these last few words still become the phrase, once more words arrive?
+  function mightBecome(words, at, phrase) {
+    if (words.length - at >= phrase.length) return false;
+    for (let k = 0; at + k < words.length; k += 1) {
+      if (!nearlySame(words[at + k], phrase[k], k > 0)) return false;
+    }
+    return true;
+  }
+
+  return {
+    feed(text) {
+      pending.push(...plainWords(text));
+      const steps = [];
+      let spoken = [];
+      const flush = () => {
+        if (spoken.length) steps.push({ say: spoken.join(" ") });
+        spoken = [];
+      };
+
+      let i = 0;
+      while (i < pending.length) {
+        const found = commands.find((c) => phraseStartsAt(pending, i, c.words));
+
+        // Where it was said matters as much as what was said. People give an
+        // instruction at the start of a breath or at the end of one — "all done",
+        // "work on the voice app", "...and check the tests, that's it". In the
+        // middle of a sentence the same words are just words: "does it send it to
+        // the server", "can you work on the login bug". So a phrase only counts at
+        // an edge, and everything buried inside a sentence stays part of it.
+        //
+        // This is worth more than any amount of cleverness about which words to
+        // listen for, because it does not depend on the words at all — as long as
+        // "the start" means what a person means by it, politeness included.
+        const onlyPolitenessBefore = pending.slice(0, i).every((word) => POLITENESS.has(word));
+        const atAnEdge = onlyPolitenessBefore || i + found?.words.length === pending.length;
+        const said = found && atAnEdge ? found : null;
+
+        if (said) {
+          // The politeness in front of an instruction was never part of a question,
+          // so it goes with the instruction rather than into what Claude is asked.
+          if (onlyPolitenessBefore) spoken = [];
+          flush();
+          // It reports the words it swallowed, so a command that turns out not to
+          // have been one can be put back into the question exactly as spoken.
+          steps.push({ command: said.name, spokenAs: pending.slice(i, i + said.words.length).join(" ") });
+          i += said.words.length;
+          continue;
+        }
+        // The rest of a phrase may still be on its way, so hold these back rather
+        // than letting them fall through into the question.
+        if (commands.some((c) => mightBecome(pending, i, c.words))) break;
+
+        spoken.push(pending[i]);
+        i += 1;
+      }
+
+      flush();
+      pending = pending.slice(i);
+      return steps;
+    },
+    // What is being held back, so it can still be shown while you say it.
+    held: () => pending.join(" "),
+  };
+}
+
+// One piece of speech on its own, for when there is no stream to keep.
+function readAsInstructions(text, phrases) {
+  const reader = makePhraseReader(phrases);
+  const steps = reader.feed(text);
+  const held = reader.held();
+  if (held) steps.push({ say: held });
+  return steps;
+}
+
+// ------------------------------------------------------------------------ sound
+//
+// Every sound the page makes goes through here, and the reason is the iPhone: a page
+// may only make sound through a channel opened by a real tap. Opening one lazily,
+// the first time something wants to be heard, gets it silently refused — and a phone
+// that thinks it is talking while making no sound is impossible to diagnose from the
+// driver's seat. So exactly one channel is opened by the Start button, and both the
+// notes and the voice go down it.
+
+// The notes, built as real sounds so they can go out the same way the voice does.
+// A phone will not play something it was not asked for by a tap, and it silences
+// anything it thinks is decoration — so these are made here rather than synthesised
+// on the channel that the mute switch turns off.
+const RATE = 8000;
+
+function wavFromSamples(samples) {
+  const bytes = new Uint8Array(44 + samples.length);
+  const view = new DataView(bytes.buffer);
+  const ascii = (at, text) => [...text].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + samples.length, true);
+  ascii(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);          // plain, uncompressed
+  view.setUint16(22, 1, true);          // one channel
+  view.setUint32(24, RATE, true);
+  view.setUint32(28, RATE, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);          // eight bits is plenty for a blip
+  ascii(36, "data");
+  view.setUint32(40, samples.length, true);
+  bytes.set(samples, 44);
+
+  let text = "";
+  for (const byte of bytes) text += String.fromCharCode(byte);
+  return `data:audio/wav;base64,${btoa(text)}`;
+}
+
+// One blip: a tone sliding from one pitch to another, faded in and out so it does
+// not click. A click in a headset at seventy miles an hour is startling.
+function blip(from, to, ms, loudness = 0.35) {
+  const count = Math.round((RATE * ms) / 1000);
+  const samples = new Uint8Array(count);
+  let phase = 0;
+  for (let i = 0; i < count; i += 1) {
+    const along = i / count;
+    const pitch = from + (to - from) * along;
+    phase += (2 * Math.PI * pitch) / RATE;
+    const fade = Math.min(1, along * 12, (1 - along) * 12);
+    samples[i] = 128 + Math.round(Math.sin(phase) * 127 * loudness * fade);
+  }
+  return samples;
+}
+
+function silenceFor(ms) {
+  return new Uint8Array(Math.round((RATE * ms) / 1000)).fill(128);
+}
+
+const NOTES = {};
+function toneFor(which, shape) {
+  if (NOTES[which]) return NOTES[which];
+  const pieces = [];
+  shape.forEach(([from, to], i) => {
+    if (i) pieces.push(silenceFor(40));
+    pieces.push(blip(from, to, which === "working" ? 90 : 130, which === "working" ? 0.18 : 0.35));
+  });
+  const total = pieces.reduce((n, piece) => n + piece.length, 0);
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const piece of pieces) { all.set(piece, at); at += piece.length; }
+  NOTES[which] = wavFromSamples(all);
+  return NOTES[which];
+}
+
+// A tenth of a second of real silence. Used once, from the tap, to open the media
+// channel — an empty or malformed sound gets refused and the channel stays shut.
+const OPENING_SOUND =
+  "data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==";
+
+const sound = {
+  channel: null,   // the notes
+  player: null,    // the voice
+  notes: null,     // the little sounds
+  finish: null,    // how to end the sentence being played, if it is cut off
+
+  // Called from the tap itself, never later.
+  wake() {
+    // Tells the phone this page is a thing you are listening to, not a decoration.
+    // Without it, everything here is silenced by the mute switch on the side of the
+    // phone — which looks exactly like broken code from the inside, because the page
+    // is told the sound played and it did, into nothing.
+    try {
+      if (navigator.audioSession) {
+        navigator.audioSession.type = "playback";
+        trace("audio session", navigator.audioSession.type);
+      } else {
+        trace("audio session", "not offered by this phone");
+      }
+    } catch (err) {
+      trace("audio session refused", err.message ?? err);
+    }
+
+    try {
+      this.channel ??= new (window.AudioContext ?? window.webkitAudioContext)();
+      if (this.channel.state === "suspended") this.channel.resume();
+      trace("sound channel", this.channel.state);
+    } catch (err) {
+      trace("sound channel refused", err.message ?? err);
+    }
+
+    // And the media channel, which is what music and video use and what the mute
+    // switch leaves alone. It only opens if the first thing played is real audio
+    // asked for by a tap, so a tenth of a second of genuine silence is played here.
+    try {
+      this.player ??= new Audio();
+      this.player.preload = "auto";
+      this.player.src = OPENING_SOUND;
+      this.player.play().then(
+        () => trace("media channel", "open"),
+        (err) => trace("media channel refused", err.message ?? err),
+      );
+
+      // The notes get their own, so that a note never cuts a sentence in half.
+      this.notes ??= new Audio();
+      this.notes.preload = "auto";
+      this.notes.src = OPENING_SOUND;
+      this.notes.play().catch(() => {});
+    } catch (err) {
+      trace("media channel refused", err.message ?? err);
+    }
+  },
+
+  get awake() { return Boolean(this.player); },
+
+  // The notes. They are built here as real sounds rather than played through the
+  // other channel, so that they go out the same way the voice does — the way the
+  // mute switch leaves alone. A note you cannot hear is worse than no note.
+  note(which) {
+    const shapes = {
+      sent: [[520, 780], [780, 990]],   // gone: two rising blips
+      ready: [[880, 660]],              // an answer is about to be read
+      working: [[300, 300]],            // still going, quietly
+      wiped: [[700, 380]],              // that has been thrown away
+      // Your turn: a bare yes or no lands right now. Two flat notes at the same
+      // pitch, which nothing else here does — every other note slides, so this one
+      // is recognisable without being listened for.
+      listening: [[880, 880], [880, 880]],
+      // And the window has shut again. Deliberately the same two notes falling away,
+      // so it is plainly the end of the thing the double note began.
+      tooLate: [[880, 620]],
+    };
+    const shape = shapes[which];
+    if (!shape || !this.notes) return;
+    try {
+      this.notes.src = toneFor(which, shape);
+      this.notes.play().catch(() => {});
+    } catch {
+      // A missing note is a small loss; it must never stop the conversation.
+    }
+  },
+
+  /**
+   * Play a piece of speech. Resolves when it has finished, or when it is cut off.
+   *
+   * This goes down the media channel rather than the other one, because the mute
+   * switch silences that one and nobody remembers which way the switch is.
+   */
+  say(bytes) {
+    if (!this.player) return Promise.reject(new Error("no sound channel — press start first"));
+
+    const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (err) => {
+        if (settled) return;
+        settled = true;
+        this.finish = null;
+        URL.revokeObjectURL(url);
+        if (err) reject(err); else resolve();
+      };
+      // Being cut off has to end this too, or the rest of the answer waits behind a
+      // sentence nobody is listening to any more.
+      this.finish = () => done();
+      this.player.onended = () => done();
+      this.player.onerror = () => done(new Error("the phone refused to play it"));
+      this.player.src = url;
+      this.player.play().catch((err) => done(err));
+    });
+  },
+
+  hush() {
+    try { this.player?.pause(); } catch {}
+    this.finish?.();
+  },
+};
+
+
+// ------------------------------------------------------------- the free front end
+
+function splitFrontEnd() {
+  const talking = {
+    onStart: () => paint(),
+    onFinish: () => { paint(); idleState(); },
+  };
+
+  // The phone's own voice is either the choice or the safety net, depending on what
+  // the Mac says it is doing.
+  const phoneVoice = deviceMouth({
+    voiceName: setup.speaker === "mac" ? "" : setup.speakerVoice,
+    rate: setup.speakerRate,
+    ...talking,
+  });
+
+  const mouth =
+    setup.speaker === "mac"
+      ? macMouth({ fallback: phoneVoice, ...talking, onTrouble: (m) => log(m, "bad") })
+      : phoneVoice;
+
+  // One running transcript of everything you have said since the last question went
+  // off. It is always being written to, it is always on the screen, and nothing
+  // removes anything from it except sending it. A pause is a person thinking.
+  const reader = makePhraseReader(setup.phrases);
+  let question = [];
+
+  // Whatever the question was before the last thing that emptied it. A misheard
+  // command is going to happen — no amount of matching makes that impossible — so
+  // the answer is not to guess better but to make guessing wrong cost nothing.
+  // Taking it back puts the words straight back.
+  let lastEmptied = [];
+  let toldAboutTheNewPage = false;
+  let live = "";        // the words being said right this second, not settled yet
+  let working = false;
+  let ears = null;
+
+  // Offering to send, once what you have said sounds like a finished sentence. The
+  // send phrase is still the certain way; this is about not needing it every time.
+  //
+  // It offers rather than sends, and it waits a beat before offering, because the two
+  // ways this goes wrong are opposites. "Check the tests and" is caught by the words
+  // themselves. "Look at the tests." … "Also the migrations." is a finished sentence
+  // that was still going, and no reading of the words can tell — only waiting can, so
+  // anything you say next calls the offer off before it is made.
+  let offerTimer = null;
+  let declined = 0;      // asked and told no, on the question as it stands
+
+  function stopOffering() {
+    if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
+  }
+
+  function maybeOfferToSend() {
+    stopOffering();
+    // Twice told no is a person who wants to keep talking. Stop asking until this
+    // question is out of the way; nagging is worse than needing the phrase.
+    if (declined >= 2) return;
+    if (waitingOn || working) return;
+    if (reader.held()) return;                       // a command may still be forming
+    if (!soundsFinished(question.join(" "))) return;
+
+    const beat = setup.offerAfter ?? 1_500;
+    const offer = () => {
+      offerTimer = null;
+      if (waitingOn || working || live || reader.held()) return;
+      if (!question.length || !soundsFinished(question.join(" "))) return;
+      // Talking underneath its own voice is the one thing that makes an offer worse
+      // than useless, so it waits for quiet rather than cutting in.
+      if (mouth?.busy) { offerTimer = setTimeout(offer, 500); return; }
+      trace("OFFERING TO SEND", question.join(" "));
+      askYesNo("Send that?", send, () => {
+        declined += 1;
+        trace("offer declined", `${declined}`);
+        sound.note("listening");
+      });
+    };
+    offerTimer = setTimeout(offer, beat);
+  }
+
+  function show() {
+    const settled = [question.join(" "), reader.held()].filter(Boolean).join(" ");
+    promptEl.textContent = settled;
+    if (live) {
+      const tail = document.createElement("span");
+      tail.className = "live";
+      tail.textContent = `${settled ? " " : ""}${live}`;
+      promptEl.append(tail);
+    }
+    promptEl.scrollTop = promptEl.scrollHeight;
+    paint();
+  }
+
+  function paint() {
+    if (mouth?.busy) { goBtn.textContent = "Quiet"; goBtn.className = "talking"; }
+    else if (question.length) { goBtn.textContent = "Send"; goBtn.className = "open"; }
+    else { goBtn.textContent = "Listening"; goBtn.className = "live"; }
+  }
+
+  function idleState() {
+    if (working) { setState("working — talk whenever you like"); return; }
+    setState(
+      question.length
+        ? `say "${setup.phrases.send}" to send it. No hurry.`
+        : `listening — nothing recorded yet`,
+    );
+  }
+
+  // Everything that was said, sent as one. This is the only thing that empties the
+  // screen, and it only ever happens because you asked for it.
+  async function send() {
+    stopOffering();
+    declined = 0;
+    // If you named a project in the same breath, that has to land first.
+    if (switching) { trace("waiting for the project to change"); await switching; }
+
+    const asked = question.join(" ").trim();
+    if (!asked) {
+      // Nothing to send means you wanted quiet: hush, and drop what is running.
+      mouth?.silence();
+      if (working) { stopWork(); working = false; stopTicking(); log("stopped", "work"); }
+      sound.note("wiped");
+      idleState();
+      return;
+    }
+
+    sound.note("sent");
+    trace("SENDING", asked);
+    lastEmptied = question;
+    question = [];
+    live = "";
+    show();
+    log(`you: ${asked}`, "you");
+
+    working = true;
+    keepTicking();
+    setState("thinking…");
+    ask(asked).catch((err) => log(String(err.message ?? err), "bad"));
+  }
+
+  function wipe() {
+    stopOffering();
+    declined = 0;
+    trace("WIPED", question.join(" "));
+    lastEmptied = question;
+    question = [];
+    live = "";
+    mouth?.silence();      // saying it is also how you cut it off
+    sound.note("wiped");
+    show();
+    setState("wiped — start again whenever you like");
+  }
+
+  // Everything you can say that is an instruction rather than part of the question.
+  // Adding one is a line here and a line in the settings on the Mac.
+  function obey(command, spokenAs = "") {
+    trace("COMMAND", command);
+    if (command === "send") return send();
+    if (command === "wipe") return wipe();
+    if (command === "read") return readBack();
+    if (command === "undo") return dropLast();
+    if (command === "forget") return forgetTheDrive();
+    if (command === "where") return sayWhere();
+    if (command === "restart") return startAppAgain();
+    if (command === "update") return takeTheNewPage();
+    if (command === "project") { awaitingProject = spokenAs; return; }
+    if (command === "help") return sayWhatYouCanSay();
+  }
+
+  // --------------------------------------------- questions the phone itself asks
+  //
+  // Anything long is worse read out in one go than not read out at all: by the third
+  // item you have lost the first, and you are driving. So nothing here says more than
+  // a couple of things before stopping to ask whether you want the rest.
+  //
+  // The awkward part was answering. Every other way of talking to this needs a send
+  // phrase on the end, which for the word "yes" is more to remember than the answer
+  // itself. So while it is waiting on a question it asked, a bare yes or no counts on
+  // its own. The window is narrow and it shuts on the first thing you say, whatever
+  // that is — so ordinary speech is never sitting inside it.
+  let waitingOn = null;      // { onYes, onNo } while a question of its own is open
+  let waitTimer = null;
+  let turnTimer = null;
+
+  function stopWaiting() {
+    if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+    waitingOn = null;
+  }
+
+  // Whether a bare yes will land is invisible from the driver's seat, and getting it
+  // wrong is expensive: you say "yes", nothing happens, and the word quietly becomes
+  // part of your next question instead. So the window announces itself. It is not
+  // sounded when it opens but when it becomes usable — the moment the talking stops —
+  // because a note played underneath its own voice is one more thing to talk over.
+  function blipWhenItIsYourTurn() {
+    if (turnTimer) clearTimeout(turnTimer);
+    const check = () => {
+      turnTimer = null;
+      if (!waitingOn) return;                                   // answered, or given up on
+      if (mouth?.busy) { turnTimer = setTimeout(check, 250); return; }
+      sound.note("listening");
+    };
+    turnTimer = setTimeout(check, 250);
+  }
+
+  function waitForAnswer(onYes, onNo) {
+    waitingOn = { onYes, onNo };
+    if (waitTimer) clearTimeout(waitTimer);
+    blipWhenItIsYourTurn();
+    const window = setup.answerWindow ?? 25_000;
+
+    // The clock is on your thinking time, and thinking time starts when the talking
+    // stops. Merely pausing the clock while it speaks is not enough — a long answer
+    // uses the whole window up before the question has even been asked, and then the
+    // window shuts the moment the last word lands. That is what happened: the window
+    // closed three seconds before an answer that was given straight away.
+    //
+    // So every moment it is still talking pushes the deadline out afresh. However
+    // long the answer, you get the full window after it, and the short gaps between
+    // one sentence and the next cannot be mistaken for silence.
+    let deadline = Date.now() + window;
+    const closeUnlessStillTalking = () => {
+      if (mouth?.busy) {
+        deadline = Date.now() + window;
+        waitTimer = setTimeout(closeUnlessStillTalking, 500);
+        return;
+      }
+      const left = deadline - Date.now();
+      if (left > 0) { waitTimer = setTimeout(closeUnlessStillTalking, Math.min(500, left)); return; }
+      trace("stopped waiting", "no answer");
+      // Say so. Silence after a question is indistinguishable from a window still
+      // being open, and the cost of guessing wrong is saying "yes" into nothing.
+      sound.note("tooLate");
+      stopWaiting();
+    };
+    waitTimer = setTimeout(closeUnlessStillTalking, 500);
+  }
+
+  function askYesNo(spoken, onYes, onNo) {
+    mouth?.speak(spoken);
+    waitForAnswer(onYes, onNo);
+  }
+
+  // Claude asks things too — "want the next one?" — and answering those was the whole
+  // complaint: saying "yes" and then the send phrase is more to remember than the
+  // answer. So the same window opens when an answer it has just read ENDS in a
+  // question.
+  //
+  // Read off the answer itself rather than set by Claude deliberately. Claude marking
+  // its own questions would work right up until it forgot, and a shortcut that works
+  // most of the time is worse than one that works for a reason. A question mark is
+  // there or it is not.
+  //
+  // Being wrong here costs nothing either way. A question it misses just needs the
+  // send phrase, the way everything does today. A question it imagines opens a window
+  // that shuts again the moment you say anything that is not yes or no — and those
+  // words go into your question untouched, exactly as they would have.
+  const endsWithAQuestion = (text) => /\?\s*$/.test(String(text ?? "").trim());
+
+  // A bare yes or no is the whole answer: it goes off on its own, no send phrase. It
+  // joins anything already dictated rather than replacing it, so a yes said after a
+  // half-built question adds to it instead of quietly throwing it away.
+  function answerClaude(word) {
+    question.push(word);
+    show();
+    send();
+  }
+
+  const saidExactly = (text, wordings) => {
+    const said = plainWords(text).join(" ");
+    if (!said) return false;
+    return [wordings].flat().some((wording) => plainWords(wording).join(" ") === said);
+  };
+
+  // Is this the whole of an answer to a question it asked, and nothing else? Asked
+  // separately from acting on it, because the echo test upstream has to know.
+  const isBareAnswer = (text) =>
+    Boolean(waitingOn) &&
+    (saidExactly(text, setup.answers?.yes ?? []) || saidExactly(text, setup.answers?.no ?? []));
+
+  // Whole utterance only. "yes" is an answer; "yes and check the tests" is a
+  // sentence, and goes where sentences go. Either way the waiting is over.
+  function answerGiven(text) {
+    if (!waitingOn) return false;
+    const said = plainWords(text).join(" ");
+    if (!said) return false;
+
+    const { onYes, onNo } = waitingOn;
+    stopWaiting();
+    if (saidExactly(text, setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
+    if (saidExactly(text, setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
+    trace("stopped waiting", `said something else: ${said}`);
+    return false;   // not an answer — carry on and treat it as speech
+  }
+
+  // Read a list out a couple at a time, asking between each lot. Written for the
+  // command list but deliberately knows nothing about commands, because everything
+  // this thing reads aloud has the same problem.
+  function readOutInTurn(items, { intro = "", done = "That's all of them." } = {}) {
+    const size = Math.max(1, setup.readOutPage ?? 2);
+    let at = 0;
+    const more = () => {
+      // The intro rides on the first lot rather than being said separately: two
+      // sentences spoken as two goes means the second one cuts the first one off.
+      const lot = [at === 0 ? intro : "", ...items.slice(at, at + size)].filter(Boolean);
+      at += Math.min(size, items.length - at);
+      const left = items.length - at;
+      const spoken = lot.join(" ");
+      log(spoken, "work");
+      if (left > 0) askYesNo(`${spoken} That's ${left} more. Want them?`, more, () => mouth?.speak("Right you are."));
+      else mouth?.speak(`${spoken} ${done}`);
+    };
+    return more;
+  }
+
+  // What you can say, said out loud. Answered here rather than by Claude, because
+  // the moment you cannot remember a command is the worst moment to wait a minute
+  // for an answer — and because asking Claude means first saying the send phrase,
+  // which is one of the things you have just forgotten.
+  //
+  // Built from the commands themselves, so one added in the settings on the Mac
+  // turns up here without this function being touched. A command with no
+  // description still gets read out, with its wordings and no explanation: a help
+  // list that quietly omits a command is the failure worth designing against.
+  function sayWhatYouCanSay() {
+    const says = (wordings) => {
+      const all = [wordings].flat();
+      if (all.length === 1) return `say "${all[0]}"`;
+      return `say "${all.slice(0, -1).join('", "')}", or "${all[all.length - 1]}"`;
+    };
+    const described = Object.entries(setup.phrases ?? {}).map(([name, wordings]) => {
+      const does = (setup.whatEachDoes ?? {})[name];
+      return does ? `To ${does}, ${says(wordings)}.` : `And ${says(wordings)}.`;
+    });
+    trace("HELP", `${described.length} commands`);
+    mouth?.silence();
+    readOutInTurn(described, { intro: `There are ${described.length}.` })();
+  }
+
+  // "work on the voice app" — the words after the phrase name the project, so the
+  // next thing said is taken as the name rather than added to the question.
+  // The words of the phrase just said, while we wait to see whether a project name
+  // follows. Null when we are not waiting.
+  let awaitingProject = null;
+
+  // A project is named at the front of what follows, and the rest is the question:
+  // "work on the voice app and check the tests" is a switch and then a question, not
+  // a project with a sentence stuck to it. So this takes the longest name that fits
+  // the opening words and hands back whatever is left over.
+  function projectAtTheFront(said) {
+    const bare = (text) => text.toLowerCase().replace(/^(the|my)\s+/, "").trim();
+    const spoken = bare(said);
+    if (!spoken) return null;
+
+    for (const { said: name, name: realName } of setup.projectNames ?? []) {
+      const wanted = bare(name);
+      if (spoken === wanted) return { project: realName, rest: "" };
+      if (spoken.startsWith(`${wanted} `)) {
+        return { project: realName, rest: said.slice(said.length - (spoken.length - wanted.length)).trim() };
+      }
+    }
+
+    // No name landed whole. Dictation mangles them — the app's own name came back as
+    // "the clot voice app" — so fall back to the word that gives a project away.
+    //
+    // It has to be at the very front, with nothing but filler before it. A giveaway
+    // word further into a sentence is just a word, and mistaking one for a name would
+    // turn an ordinary question into a switch.
+    const FILLER = new Set(["the", "my", "a", "an", "to", "on", "over", "onto", "into"]);
+    const PART_OF_A_NAME = new Set(["app", "apps", "application", "project", "code", "one", "thing"]);
+    const words = spoken.split(/\s+/);
+
+    let at = 0;
+    while (at < words.length && FILLER.has(words[at])) at += 1;
+    if (at >= words.length) return null;
+
+    for (const [project, giveaways] of Object.entries(setup.giveaways ?? {})) {
+      const gives = (word) => giveaways.some((giveaway) => nearlySame(word, giveaway));
+      if (!gives(words[at])) continue;
+
+      // The name may run on — "clot voice app" is three words for one project — so
+      // everything that is still plainly part of the name is swallowed with it, and
+      // what is left is the question.
+      let after = at + 1;
+      while (after < words.length && (gives(words[after]) || PART_OF_A_NAME.has(words[after]))) {
+        after += 1;
+      }
+      return { project, rest: words.slice(after).join(" ") };
+    }
+
+    return null;
+  }
+
+  // Changing this app's code by talking to it does nothing until it starts again,
+  // and there is nobody at the keyboard to do it. It comes back on its own; the page
+  // simply waits, because the link to the Mac reconnects by itself.
+  // Loading the new page costs the sound channel, so it is never done to you while
+  // you are mid-drive — it is offered, and you take it when you are ready.
+  function takeTheNewPage() {
+    if (!newPageWaiting) {
+      mouth?.speak("There is no new page waiting. This is the current one.");
+      return;
+    }
+    mouth?.speak("Loading it. Tap the button once to get my voice back.");
+    // Long enough to be heard, since the page is about to be replaced mid-sentence.
+    setTimeout(() => loadTheNewPage(question.join(" ")), 3_500);
+  }
+
+  async function startAppAgain() {
+    mouth?.silence();
+    mouth?.speak("Starting again.");
+    trace("ASKED FOR A RESTART");
+    try {
+      await fetch("/restart", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ why: "asked out loud" }),
+      });
+    } catch {
+      // It went down before it could answer, which is exactly what was asked for.
+    }
+  }
+
+  function sayWhere() {
+    mouth?.silence();
+    mouth?.speak(`We are on ${setup.project}.`);
+  }
+
+  // A question said in the same breath as the switch must not go to the project you
+  // just left, so sending waits for this to land.
+  let switching = null;
+
+  async function switchTo(name) {
+    awaitingProject = null;
+    mouth?.silence();
+    let landed;
+    switching = new Promise((resolve) => { landed = resolve; });
+    try {
+      const answer = await fetch("/project", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const result = await answer.json();
+
+      if (!answer.ok) {
+        trace("UNKNOWN PROJECT", name);
+        log(`no project called "${name}"`, "bad");
+        mouth?.speak(`I don't know ${name}. I know ${(result.projects ?? []).join(", ")}.`);
+        return;
+      }
+
+      // Everything said before this was aimed at the old project, so it goes with it.
+      setup.project = result.project;
+      question = [];
+      live = "";
+      show();
+      trace("PROJECT", result.project);
+      log(`now working on ${result.project}`, "work");
+      sound.note("sent");
+      mouth?.speak(`Now working on ${result.project}. Anything else I do is in there.`);
+    } catch (err) {
+      log(String(err.message ?? err), "bad");
+    } finally {
+      landed();
+      switching = null;
+    }
+  }
+
+  // Claude remembers the whole drive, which is what makes "and the tests?" mean
+  // something. This is how you tell it to stop remembering.
+  function forgetTheDrive() {
+    stopOffering();
+    declined = 0;
+    forgetDrive();
+    lastEmptied = question;
+    question = [];
+    live = "";
+    show();
+    log("forgot the drive so far", "work");
+    mouth?.silence();
+    sound.note("wiped");
+    mouth?.speak("Forgotten. Starting fresh.");
+  }
+
+  // Work takes anywhere from ten seconds to a few minutes, and silence for that long
+  // is indistinguishable from something having gone wrong. So it says quietly that it
+  // is still there — soft, and not often enough to become wallpaper.
+  let tick = null;
+  function keepTicking() {
+    stopTicking();
+    tick = setInterval(() => {
+      if (!mouth?.busy) sound.note("working");
+    }, 15_000);
+  }
+  function stopTicking() {
+    clearInterval(tick);
+    tick = null;
+  }
+
+  // Says back what it has so far. Its own voice is filtered out of what it hears,
+  // so reading the question aloud cannot end up recorded as part of the question.
+  function readBack() {
+    const soFar = question.join(" ").trim();
+    trace("READING BACK", soFar || "(nothing)");
+    log(soFar ? `reading back: ${soFar}` : "nothing recorded yet", "work");
+    mouth?.silence();
+    mouth?.speak(soFar ? `So far you have. ${soFar}` : "Nothing recorded yet.");
+  }
+
+  // The last thing you said, taken out. Dictation hands over a piece each time you
+  // pause, so a piece is roughly a sentence — which is what you would want back.
+  function dropLast() {
+    // Nothing left to drop, but something was emptied a moment ago — so this means
+    // "undo that", which is what a person means by it. A wipe that cannot be undone
+    // is the only failure here that actually costs you anything.
+    if (!question.length && lastEmptied.length) {
+      question = lastEmptied;
+      lastEmptied = [];
+      trace("PUT BACK", question.join(" "));
+      log(`put back: ${question.join(" ")}`, "work");
+      show();
+      mouth?.silence();
+      sound.note("listening");
+      mouth?.speak(`Put back. ${question.join(" ")}`);
+      return;
+    }
+
+    if (!question.length) {
+      mouth?.silence();
+      mouth?.speak("There is nothing to take back.");
+      return;
+    }
+    const dropped = question.pop();
+    trace("TOOK BACK", dropped);
+    log(`took back: ${dropped}`, "work");
+    show();
+    mouth?.silence();
+    sound.note("wiped");
+    const left = question.join(" ").trim();
+    mouth?.speak(left ? `Taken out. It now ends. ${question[question.length - 1]}` : "Taken out. Nothing left.");
+  }
+
+  function heard(text) {
+    live = "";
+    // Anything you say calls off an offer that has not been made yet — this is what
+    // stops a sentence you were still adding to from being asked about.
+    stopOffering();
+
+    // A one-word answer to a question it has just asked goes through before anything
+    // else, echo test included. The echo test only counts words longer than three
+    // letters, so "yes" and "no" leave nothing behind to compare and were being
+    // thrown away as its own voice — silently, at the exact moment you were most
+    // likely to say them, which is while it is still finishing the question.
+    if (isBareAnswer(text)) {
+      mouth?.silence();
+      answerGiven(text);
+      return;
+    }
+
+    // Its own voice off the windscreen is not part of your question. This is the
+    // only thing standing between always-listening and it writing down its own answer.
+    if (mouth?.busy) {
+      if (soundsLikeItself(text, mouth.saying)) { trace("ignored (its own voice)", text); return; }
+      mouth.silence();   // you talked over it, so it stops and listens
+    }
+
+    // A question it asked gets first refusal on what you said next. This is before
+    // the phrase reader on purpose: while it is waiting, "no" means no, and does not
+    // want treating as the start of a sentence.
+    if (answerGiven(text)) return;
+
+    for (const step of reader.feed(text)) {
+      if (step.command) { obey(step.command, step.spokenAs); continue; }
+
+      // "work on" is also something people say inside a perfectly ordinary question —
+      // "can you work on the login bug". So it only counts as changing project if
+      // what follows actually names one; otherwise both halves go back where they
+      // came from and it is a question like any other.
+      // The noises come out here, before anything reads what was said: a project name
+      // with an "um" in front of it is still the project name.
+      const said = withoutFiller(step.say);
+      if (!said) { trace("dropped (nothing but filler)", step.say); continue; }
+      if (said !== step.say) trace("filler out", `${step.say} -> ${said}`);
+
+      if (awaitingProject) {
+        const found = projectAtTheFront(said);
+        awaitingProject = null;
+        if (found) {
+          switchTo(found.project);
+          if (found.rest) { question.push(found.rest); trace("keeping", found.rest); }
+          continue;
+        }
+        question.push(`${awaitingProject ?? ""} ${said}`.trim());
+        trace("not a project, so just words", said);
+        continue;
+      }
+
+      question.push(said);
+      trace("keeping", said);
+    }
+
+    show();
+    if (!mouth?.busy) idleState();
+    maybeOfferToSend();
+  }
+
+  function fromClaude(kind, text) {
+    if (kind === "progress") {
+      log(text, "work");
+      setState(text);
+      return;
+    }
+    if (kind === "final") {
+      working = false;
+      stopTicking();
+      if (newPageWaiting && !toldAboutTheNewPage) {
+        toldAboutTheNewPage = true;
+        log("a newer page is ready — say \"load the new page\" when you can", "work");
+      }
+      log(text.slice(0, 400));
+      sound.note("ready");
+      mouth?.speak(text);
+      if (endsWithAQuestion(text)) {
+        trace("waiting", "the answer ended in a question");
+        waitForAnswer(() => answerClaude("yes"), () => answerClaude("no"));
+      }
+      return;
+    }
+    if (kind === "error") {
+      working = false;
+      stopTicking();
+      log(text, "bad");
+      mouth?.speak(text);
+    }
+  }
+
+  return {
+    async start() {
+      if (!mouth) throw new Error("This browser has no built-in voice. Use Safari.");
+      mouth.unlock();
+
+      ears = deviceEars({
+        onHeard: heard,
+        onHearing: (text) => { live = text; stopOffering(); show(); },
+        // Talking over it has to stop it straight away rather than at the end of
+        // your sentence, so this acts on words it has not finished hearing.
+        onPartialPhrase: (text) => {
+          if (mouth?.busy && !soundsLikeItself(text, mouth.saying)) mouth.silence();
+        },
+        onTrouble: (message) => log(message, "bad"),
+      });
+      if (!ears) throw new Error("This browser has no built-in dictation. Use Safari on the phone.");
+
+      listenForResults(fromClaude);
+      ears.start();
+      goBtn.disabled = false;
+
+      // Whatever was being said when the page was replaced under it.
+      try {
+        const kept = sessionStorage.getItem(KEPT);
+        if (kept) {
+          sessionStorage.removeItem(KEPT);
+          question = [kept];
+          log(`carried over: ${kept}`, "work");
+        }
+      } catch {}
+      show();
+      idleState();
+      const firstWording = (name) => [setup.phrases?.[name]].flat()[0];
+      log(
+        `ready — talk. Say "${firstWording("send")}" to send, ` +
+        `"${firstWording("read")}" to hear it back, ` +
+        `"${firstWording("wipe")}" to start again.`,
+        "work",
+      );
+      trace("session started");
+    },
+    stop() {
+      ears?.stop(); ears = null;
+      mouth?.silence();
+      results?.close(); results = null;
+      stopWork();
+      stopTicking();
+      working = false;
+      question = [];
+      live = "";
+      promptEl.textContent = "";
+    },
+    // The same thing the closing phrase does, for when the road is too loud to be
+    // heard over. Never needed, always there.
+    tap() {
+      if (mouth?.busy) { mouth.silence(); trace("tapped: quiet"); return; }
+      trace("tapped: send");
+      send();
+    },
+  };
+}
+
+// ------------------------------------------------------- the paid front end
+//
+// The original: one model does the hearing and the speaking inside a single billed
+// audio stream. Kept because natural interruption is genuinely better — it is simply
+// not worth its price for most drives.
+
+function realtimeFrontEnd() {
+  let pc = null, dc = null, live = false;
+  let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = null;
+  let lastSpokeAt = 0;
+  const PROGRESS_MIN_GAP_MS = 25_000;
+
+  // Every time you speak, the whole conversation so far is billed again, so a long
+  // drive gets steadily more expensive. The voice model is only a mouthpiece —
+  // everything that matters is remembered by Claude on the Mac — so we throw away
+  // its older turns and keep the cost flat. Nothing real is lost.
+  const KEEP_TURNS = 10;
+  const itemIds = [];
+
+  function sendEvent(obj) {
+    if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+  }
+
+  function trimConversation() {
+    while (itemIds.length > KEEP_TURNS) {
+      sendEvent({ type: "conversation.item.delete", item_id: itemIds.shift() });
+    }
+  }
+
+  function speakThrough(note) {
+    sendEvent({
+      type: "conversation.item.create",
+      item: { type: "message", role: "user", content: [{ type: "input_text", text: note }] },
+    });
+    sendEvent({ type: "response.create" });
+    lastSpokeAt = Date.now();
+  }
+
+  const TOOLS = [
+    {
+      type: "function",
+      name: "ask_claude",
+      description:
+        "Hand a request to Claude, which reads and reasons about the user's real code on their machine. " +
+        "Use this for ANY question or instruction about their code, project, tests, commits, or tools — " +
+        "you have no knowledge of these yourself. Returns immediately; the answer arrives later and you " +
+        "will be told to speak it.",
+      parameters: {
+        type: "object",
+        properties: {
+          request: {
+            type: "string",
+            description:
+              "What the user wants, in full, as an instruction to a capable engineer. Include anything " +
+              "from earlier in the conversation that is needed to make sense of it on its own.",
+          },
+        },
+        required: ["request"],
+      },
+    },
+    {
+      type: "function",
+      name: "stop_claude",
+      description: "Stop whatever Claude is currently doing. Use when the user says stop.",
+      parameters: { type: "object", properties: {} },
+    },
+  ];
+
+  async function configureSession() {
+    instructionsCache ??= await (await fetch("/instructions")).text();
+    sendEvent({
+      type: "session.update",
+      session: { type: "realtime", instructions: instructionsCache, tools: TOOLS, tool_choice: "auto" },
+    });
+  }
+
+  function answerTool(callId, output) {
+    sendEvent({
+      type: "conversation.item.create",
+      item: { type: "function_call_output", call_id: callId, output },
+    });
+    sendEvent({ type: "response.create" });
+    lastSpokeAt = Date.now();
+  }
+
+  async function onVoiceEvent(event) {
+    switch (event.type) {
+      case "response.function_call_arguments.done": {
+        const args = JSON.parse(event.arguments || "{}");
+        if (event.name === "ask_claude") {
+          log(`you: ${args.request}`, "you");
+          await ask(args.request);
+          answerTool(event.call_id, "Started. Say one short sentence to acknowledge, then wait quietly.");
+        } else if (event.name === "stop_claude") {
+          await stopWork();
+          log("stopped", "work");
+          answerTool(event.call_id, "Stopped.");
+        }
+        break;
+      }
+      case "conversation.item.created":
+      case "conversation.item.added":
+        if (event.item?.id) itemIds.push(event.item.id);
+        break;
+      case "response.done":
+        lastSpokeAt = Date.now();
+        trimConversation(); // only between turns, never mid-sentence
+        break;
+      case "error":
+        log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
+        break;
+    }
+  }
+
+  function fromClaude(kind, text) {
     if (kind === "progress") {
       log(text, "work");
       // Only interrupt with progress if it's been quiet for a while.
@@ -195,145 +1823,190 @@ function listenForResults() {
       }
       return;
     }
-
     if (kind === "final") {
-      log(text.slice(0, 400), "");
+      log(text.slice(0, 400));
       speakThrough(
         `[Claude has finished and this is its answer. Speak it to the user following your speaking rules — ` +
         `plain words, no code, lead with the outcome, findings one at a time. Do not read it verbatim.\n\n${text}]`
       );
       return;
     }
-
     if (kind === "error") {
       log(text, "bad");
       speakThrough(`[Something went wrong: ${text}. Tell the user in one plain sentence and ask what they want to do.]`);
     }
-  };
-  events.onerror = () => setState("lost the link to the Mac — retrying");
-}
-
-// ------------------------------------------------------------------ connect
-
-// A dropped connection is the most likely way a real drive falls apart — a tunnel,
-// a cell handoff, a dead spot. Nothing here should ever require taking the phone
-// out of a pocket, so we simply keep trying until we're back.
-
-async function connect({ resume }) {
-  setState(resume ? "reconnecting…" : "connecting…");
-
-  const url = resume ? "/token?resume=1" : "/token";
-  const { secret } = await (await fetch(url, { method: "POST" })).json();
-  if (!secret) throw new Error("no voice credential");
-
-  // Ask for the microphone once and keep it. Asking again on every reconnect
-  // would prompt the user, which is exactly what we can't do at 70mph.
-  micStream ??= await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-
-  pc = new RTCPeerConnection();
-
-  const speaker = new Audio();
-  speaker.autoplay = true;
-  pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
-  pc.addTrack(micStream.getTracks()[0], micStream);
-
-  pc.onconnectionstatechange = () => {
-    if (!live) return;
-    if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-      log(`connection ${pc.connectionState}`, "bad");
-      scheduleReconnect();
-    }
-  };
-
-  dc = pc.createDataChannel("oai-events");
-  dc.onopen = async () => {
-    itemIds.length = 0; // a new voice session — old turn identifiers are stale
-    await configureSession();
-    const wasReconnect = resume;
-    attempt = 0;
-    live = true;
-    setState("listening — just talk");
-    goBtn.textContent = "Stop";
-    goBtn.className = "live";
-    goBtn.disabled = false;
-    log(wasReconnect ? "reconnected" : "connected", "work");
-
-    if (wasReconnect) {
-      speakThrough(
-        "[You just reconnected after the network dropped. Claude's work and your " +
-        "conversation with the user are both intact. Say briefly that you're back, then wait.]"
-      );
-    }
-  };
-  dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
-    method: "POST",
-    headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
-    body: offer.sdp,
-  });
-  if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
-
-  await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
-
-  if (!events) listenForResults();
-}
-
-function scheduleReconnect() {
-  if (!live || reconnectTimer) return;
-
-  try { pc?.close(); } catch {}
-  pc = null; dc = null;
-
-  const wait = Math.min(1000 * 2 ** attempt, 10_000);
-  attempt += 1;
-  setState(`connection lost — retrying in ${Math.round(wait / 1000)}s`);
-
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    if (!live) return;
-    try {
-      await connect({ resume: true });
-    } catch (err) {
-      log(String(err.message ?? err), "bad");
-      scheduleReconnect();
-    }
-  }, wait);
-}
-
-async function start() {
-  goBtn.disabled = true;
-  live = true;      // set before connecting so a drop mid-handshake still retries
-  attempt = 0;
-  try {
-    await connect({ resume: false });
-  } catch (err) {
-    log(String(err.message ?? err), "bad");
-    scheduleReconnect();
   }
+
+  // A dropped connection is the most likely way a real drive falls apart — a tunnel,
+  // a cell handoff, a dead spot. Nothing here should ever require taking the phone
+  // out of a pocket, so we simply keep trying until we're back.
+  async function connect({ resume }) {
+    setState(resume ? "reconnecting…" : "connecting…");
+
+    const url = resume ? "/token?resume=1" : "/token";
+    const { secret, error } = await (await fetch(url, { method: "POST" })).json();
+    if (!secret) throw new Error(error ?? "no voice credential");
+
+    // Ask for the microphone once and keep it. Asking again on every reconnect
+    // would prompt the user, which is exactly what we can't do at 70mph.
+    micStream ??= await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+
+    pc = new RTCPeerConnection();
+
+    const speaker = new Audio();
+    speaker.autoplay = true;
+    pc.ontrack = (e) => { speaker.srcObject = e.streams[0]; };
+    pc.addTrack(micStream.getTracks()[0], micStream);
+
+    pc.onconnectionstatechange = () => {
+      if (!live) return;
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        log(`connection ${pc.connectionState}`, "bad");
+        scheduleReconnect();
+      }
+    };
+
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = async () => {
+      itemIds.length = 0; // a new voice session — old turn identifiers are stale
+      await configureSession();
+      attempt = 0;
+      live = true;
+      setState("listening — just talk");
+      goBtn.textContent = "Stop";
+      goBtn.className = "live";
+      goBtn.disabled = false;
+      log(resume ? "reconnected" : "connected — this mode is billed per minute", "work");
+
+      if (resume) {
+        speakThrough(
+          "[You just reconnected after the network dropped. Claude's work and your " +
+          "conversation with the user are both intact. Say briefly that you're back, then wait.]"
+        );
+      }
+    };
+    dc.onmessage = (m) => onVoiceEvent(JSON.parse(m.data)).catch(console.error);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const answer = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}`, "content-type": "application/sdp" },
+      body: offer.sdp,
+    });
+    if (!answer.ok) throw new Error(`voice service refused: ${answer.status} ${await answer.text()}`);
+
+    await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
+
+    if (!results) listenForResults(fromClaude);
+  }
+
+  function scheduleReconnect() {
+    if (!live || reconnectTimer) return;
+
+    try { pc?.close(); } catch {}
+    pc = null; dc = null;
+
+    const wait = Math.min(1000 * 2 ** attempt, 10_000);
+    attempt += 1;
+    setState(`connection lost — retrying in ${Math.round(wait / 1000)}s`);
+
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      if (!live) return;
+      try {
+        await connect({ resume: true });
+      } catch (err) {
+        log(String(err.message ?? err), "bad");
+        scheduleReconnect();
+      }
+    }, wait);
+  }
+
+  return {
+    async start() {
+      live = true; // set before connecting so a drop mid-handshake still retries
+      attempt = 0;
+      try {
+        await connect({ resume: false });
+      } catch (err) {
+        log(String(err.message ?? err), "bad");
+        scheduleReconnect();
+      }
+    },
+    stop() {
+      live = false;
+      clearTimeout(reconnectTimer); reconnectTimer = null;
+      try { pc?.close(); } catch {}
+      pc = null; dc = null;
+      results?.close(); results = null;
+      micStream?.getTracks().forEach((t) => t.stop());
+      micStream = null;
+      stopWork();
+    },
+    // This mode hears you continuously and has no gate, so the button has nothing to
+    // toggle. It is still the fastest way to shut it up.
+    tap: () => speakThrough("[The user pressed quiet. Stop talking and wait.]"),
+  };
 }
 
-function stop() {
-  live = false;
-  clearTimeout(reconnectTimer); reconnectTimer = null;
-  try { pc?.close(); } catch {}
-  pc = null; dc = null;
-  events?.close(); events = null;
-  micStream?.getTracks().forEach((t) => t.stop());
-  micStream = null;
-  fetch("/stop", { method: "POST" }).catch(() => {});
+// ------------------------------------------------------------------- the button
+
+const frontEnd = setup.mode === "realtime" ? realtimeFrontEnd() : splitFrontEnd();
+let running = false;
+
+// The screen locking mid-drive would end the session, so ask the phone to keep it on
+// while this page is in front. It is a request, not a guarantee.
+let wakeLock = null;
+async function holdScreenAwake() {
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (running && document.visibilityState === "visible") holdScreenAwake();
+});
+
+setState(
+  setup.mode === "realtime"
+    ? `ready — paid voice, working on ${setup.project}`
+    : `ready — free voice, working on ${setup.project}`
+);
+
+function backToStopped() {
+  running = false;
+  wakeLock?.release?.(); wakeLock = null;
   setState("not connected");
   goBtn.textContent = "Start talking";
   goBtn.className = "";
   goBtn.disabled = false;
+  endBtn.hidden = true;
+  heardEl.textContent = "";
+  heardEl.className = "";
 }
 
-goBtn.onclick = () => (live ? stop() : start());
+// While it is running the big button is the gate, not a hang-up. Ending the session
+// is the rare thing, so it gets the small link and cannot be hit by accident.
+goBtn.onclick = async () => {
+  if (running) return frontEnd.tap();
+
+  running = true;
+  goBtn.disabled = true;
+  holdScreenAwake();
+  try {
+    await frontEnd.start();
+    endBtn.hidden = false;
+  } catch (err) {
+    log(String(err.message ?? err), "bad");
+    backToStopped();
+  }
+};
+
+endBtn.onclick = () => {
+  frontEnd.stop();
+  backToStopped();
+};
 </script>
 </body>
 </html>

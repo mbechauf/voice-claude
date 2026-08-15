@@ -2,7 +2,7 @@
 // goes, so the voice has something honest to say during the long pauses.
 
 import { spawn } from "node:child_process";
-import { ALLOWED_TOOLS, PROJECT_DIR, WORK_TIMEOUT_MS } from "./config.mjs";
+import { ALLOWED_TOOLS, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
 
 // Turns a tool name into something sayable. Deliberately vague about paths —
 // nobody driving wants to hear a directory listing.
@@ -10,6 +10,12 @@ function describeTool(name) {
   switch (name) {
     case "Read":
       return "reading the code";
+    case "Edit":
+    case "Write":
+      // Deliberately not the file name, and deliberately not what changed. Hearing
+      // the same path read out twenty times tells you nothing you did not know, and
+      // what it actually did belongs in the answer at the end.
+      return "changing the code";
     case "Grep":
     case "Glob":
       return "searching through the project";
@@ -50,13 +56,19 @@ export function stopWork() {
 /**
  * Hand a request to Claude. Returns immediately; results arrive through `emit`.
  * emit(kind, text) where kind is "progress" | "final" | "error".
+ *
+ * `briefing` is how Claude is told to answer — plain spoken sentences rather than a
+ * written report. It only goes out on the first request of a conversation, because
+ * every later one continues that same conversation and Claude still has it.
  */
-export function startWork(request, emit) {
+export function startWork(request, emit, { briefing = "", project = STARTING_PROJECT } = {}) {
   if (current) stopWork();
+
+  const opening = briefing && !conversationId ? `${briefing}\n\n---\n\n${request}` : request;
 
   const args = [
     "-p",
-    request,
+    opening,
     "--output-format",
     "stream-json",
     "--verbose",
@@ -76,8 +88,10 @@ export function startWork(request, emit) {
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
 
+  // The folder it runs in is the project you said you were working on. Everything
+  // follows from that: which files it sees, and which repository an issue lands on.
   const child = spawn("claude", args, {
-    cwd: PROJECT_DIR,
+    cwd: project,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });

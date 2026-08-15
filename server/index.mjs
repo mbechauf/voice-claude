@@ -10,21 +10,168 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 
-import { PORT, PROJECT_DIR, VOICE_MODEL, VOICE_NAME } from "./config.mjs";
-import { forgetConversation, startWork, stopWork } from "./claude-bridge.mjs";
+import {
+  ANSWERS,
+  ANSWER_WINDOW_MS,
+  GATE,
+  LISTENER,
+  MODE,
+  OPEN_TIMEOUT_MS,
+  PHRASES,
+  PAUSE_MS,
+  READ_OUT_PAGE,
+  PORT,
+  EVERY_PROJECT_NAME,
+  GIVEAWAY_WORDS,
+  PROJECTS,
+  STARTING_PROJECT,
+  SPEAKER,
+  SPEAKER_RATE,
+  SPEAKER_VOICE,
+  VOICE_MODEL,
+  VOICE_NAME,
+  WHAT_EACH_DOES,
+} from "./config.mjs";
+import { forgetConversation, isBusy, startWork, stopWork } from "./claude-bridge.mjs";
+import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
+
+// ------------------------------------------------------------- what we are on
+//
+// One thing decides where everything happens: which files get changed, what Claude
+// can see, and which repository an issue is filed against. It is said out loud and
+// repeated back, because a project chosen by mistake does its damage quietly while
+// you are watching the road.
+let project = STARTING_PROJECT;
+
+const nameOf = (dir) =>
+  Object.entries(PROJECTS).find(([, p]) => p.at === dir)?.[0] ?? path.basename(dir);
+
+// Claude is told, every time the project changes, that it is the whole world for
+// this conversation. The folder it runs in is the real boundary; this is so it does
+// not go looking for something helpful in a neighbouring project and change that.
+const boundary = () =>
+  `You are working on ${nameOf(project)}, at ${project}. Everything you are asked ` +
+  `for is about that project and nothing else: read, change and file issues only ` +
+  `there. If something you need appears to be in another project, say so and stop ` +
+  `rather than reaching into it.` +
+  (project === PROJECTS["the voice app"].at
+    ? ` You are working on the thing you are being spoken through. What the phone ` +
+      `decided, moment by moment, is in .voice-claude/trace.log — read it rather than ` +
+      `guessing at why something behaved oddly. Running "npm run check" is allowed ` +
+      `and is how you find out whether a change is any good.`
+    : "");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 
+// Only the paid mode needs a paid credential. Demanding one in the free mode would
+// be a quiet insistence that you keep an account you are trying not to spend on.
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_KEY) {
-  console.error("OPENAI_API_KEY is not set. Set it and try again.");
+if (MODE === "realtime" && !OPENAI_KEY) {
+  console.error("Realtime mode needs OPENAI_API_KEY. Set it, or leave the free mode on.");
   process.exit(1);
+}
+
+// The speaking rules only matter when nothing sits between Claude and the speaker.
+// In realtime mode the voice model rewrites Claude's answer, and applies its own.
+const speakingRules =
+  MODE === "realtime" ? "" : fs.readFileSync(path.join(here, "spoken-answer-rules.md"), "utf8");
+
+// Asking for a voice that isn't installed would leave someone in a car listening to
+// silence, so say so here and fall back to the phone's own rather than fail later.
+const speaker = SPEAKER === "mac" && !macVoiceInstalled() ? "device" : SPEAKER;
+if (SPEAKER === "mac" && speaker !== "mac") {
+  console.log(`The good voice isn't installed yet — run "npm run voice:install".`);
+  console.log(`Falling back to the phone's own voice for now.\n`);
+}
+
+// The moment the phone's page was last written. The phone knows the one it is
+// running, so the two can be compared and a stale page can say so — half of this
+// system runs in the browser, and restarting the Mac side does nothing for it.
+const pageStamp = () =>
+  fs.statSync(path.join(root, "web", "index.html")).mtime.toISOString().slice(5, 16).replace("T", " ");
+
+// -------------------------------------------------------------- starting again
+//
+// The app is changed by talking to it now, and a change to its own code means
+// nothing until it starts again. There is nobody at the keyboard to do that, so it
+// asks: it exits with a code the script outside understands, and that script starts
+// it afresh. Exiting rather than reloading in place is the point — a process that
+// replaces its own code while running keeps the old version in memory, which is
+// exactly the confusion this is meant to end.
+const RESTART = 75;
+
+let restarting = false;
+
+// Ctrl-C, or being killed, means a person wants it to stop — so it leaves the way
+// the script outside reads as "stay down". Without this, the loop faithfully starts
+// it again and the app cannot be stopped at all, which is the obvious way to build
+// something that keeps itself alive and the wrong one.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    console.log(`\nstopping.`);
+    process.exit(0);
+  });
+}
+
+function startAgain(why) {
+  if (restarting) return;
+  restarting = true;
+  console.log(`\n== starting again: ${why}`);
+  broadcast("restarting", why);
+  // Let the phone hear about it before the connection dies under it.
+  setTimeout(() => process.exit(RESTART), 250);
+}
+
+// Its own code changing underneath it. Only while nothing is running — interrupting
+// Claude mid-answer to pick up a change is a poor trade — and only after things have
+// been quiet for a moment, because an edit arrives as a flurry of small writes.
+function watchOwnCode() {
+  if (process.env.VOICE_CLAUDE_WATCH === "off") return;
+
+  let settle = null;
+  const changed = (file) => {
+    if (!file || restarting) return;
+    if (!/\.(mjs|js|html|py)$/.test(file)) return;
+    clearTimeout(settle);
+    settle = setTimeout(() => {
+      if (isBusy()) { settle = setTimeout(() => changed(file), 5_000); return; }
+      startAgain(`${file} changed`);
+    }, 1_500);
+  };
+
+  for (const dir of ["server", "web", "scripts"]) {
+    try {
+      fs.watch(path.join(root, dir), { recursive: true }, (_, file) => changed(file));
+    } catch (err) {
+      console.error(`couldn't watch ${dir}: ${err.message}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- listeners
 
 const listeners = new Set();
+const trace = [];
+
+// The log of what the phone decided, written into this app's own folder as well as
+// shown here. Over the network it needs a command nobody should be handing out; as
+// a file, whatever is working on this app can simply read it. Ignored by version
+// control, and it never leaves the machine.
+//
+// It is added to, never replaced. It used to start empty on every run, which was
+// harmless until the app began restarting itself whenever its code changed — and
+// then every real sentence anyone had said was being thrown away several times an
+// hour. Those sentences are the only honest record of how people actually talk to
+// this thing, and they are what any better way of understanding them will be judged
+// against. They are worth more than the disk they sit on.
+const TRACE_FILE = path.join(root, ".voice-claude", "trace.log");
+try {
+  fs.mkdirSync(path.dirname(TRACE_FILE), { recursive: true });
+  fs.appendFileSync(TRACE_FILE, `\n-- started ${new Date().toISOString()}\n`);
+} catch (err) {
+  console.error(`couldn't open the log: ${err.message}`);
+}
 
 function broadcast(kind, text) {
   const payload = `data: ${JSON.stringify({ kind, text })}\n\n`;
@@ -85,8 +232,19 @@ async function handle(req, res) {
   const url = new URL(req.url, "http://localhost");
 
   if (url.pathname === "/" || url.pathname === "/index.html") {
-    const html = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
-    return send(res, 200, html, "text/html; charset=utf-8");
+    const file = path.join(root, "web", "index.html");
+    const html = fs.readFileSync(file, "utf8");
+    // A phone holding on to yesterday's page and a genuine bug look identical from
+    // the driver's seat, and one of them wastes an afternoon. So it is never cached,
+    // and the page carries the moment it was written so both ends can see which it is.
+    const stamp = pageStamp();
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store, must-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    });
+    return res.end(html.replace("__VERSION__", stamp));
   }
 
   if (url.pathname === "/instructions") {
@@ -94,7 +252,58 @@ async function handle(req, res) {
     return send(res, 200, text, "text/plain; charset=utf-8");
   }
 
+  // The phone asks what it is meant to be before it does anything, so that changing
+  // the voice layer is a setting on the Mac and never an edit to the page.
+  if (url.pathname === "/setup") {
+    return send(res, 200, {
+      mode: MODE,
+      listener: LISTENER,
+      speaker,
+      speakerVoice: SPEAKER_VOICE,
+      speakerRate: SPEAKER_RATE,
+      page: pageStamp(),
+      gate: GATE,
+      pause: PAUSE_MS,
+      phrases: PHRASES,
+      whatEachDoes: WHAT_EACH_DOES,
+      answers: ANSWERS,
+      answerWindow: ANSWER_WINDOW_MS,
+      readOutPage: READ_OUT_PAGE,
+      openTimeout: OPEN_TIMEOUT_MS,
+      project: nameOf(project),
+      projects: Object.keys(PROJECTS),
+      // Every name each answers to, longest first, so the phone can pick a project
+      // out of the front of a sentence and leave the rest as the question.
+      projectNames: EVERY_PROJECT_NAME,
+      // The word that gives each project away, for when the spoken name comes back
+      // mangled — "the clot voice app" is still plainly the voice one.
+      giveaways: GIVEAWAY_WORDS,
+    });
+  }
+
+  // One sentence in, the sound of it out. The phone asks for these one at a time as
+  // it reads an answer, so that "stop" lands within a breath.
+  if (url.pathname === "/say" && req.method === "POST") {
+    const { text } = await readBody(req);
+    if (!text) return send(res, 400, { error: "nothing to say" });
+    try {
+      const audio = await speak(text);
+      res.writeHead(200, {
+        "content-type": "audio/wav",
+        "content-length": audio.length,
+        "cache-control": "no-store",
+      });
+      return res.end(audio);
+    } catch (err) {
+      console.error(`voice: ${err.message}`);
+      return send(res, 503, { error: String(err.message ?? err) });
+    }
+  }
+
   if (url.pathname === "/token" && req.method === "POST") {
+    if (MODE !== "realtime") {
+      return send(res, 409, { error: "this server is running the free voice mode" });
+    }
     try {
       // A fresh start wipes the slate; a reconnect after a dropped signal must not,
       // or a tunnel would cost you everything Claude had established.
@@ -110,11 +319,80 @@ async function handle(req, res) {
     const { request } = await readBody(req);
     if (!request) return send(res, 400, { error: "no request" });
     console.log(`\n→ ${request}`);
-    startWork(request, (kind, text) => {
-      console.log(`  ${kind}: ${text.slice(0, 120)}`);
-      broadcast(kind, text);
-    });
+    startWork(
+      request,
+      (kind, text) => {
+        console.log(`  ${kind}: ${text.slice(0, 120)}`);
+        broadcast(kind, text);
+      },
+      { briefing: `${speakingRules}\n\n${boundary()}`, project },
+    );
     return send(res, 202, { started: true });
+  }
+
+  // What the phone is actually doing, said out loud on the Mac. Dictation goes wrong
+  // in ways you cannot see from the driver's seat, and guessing from a description
+  // of the symptom wastes drives.
+  if (url.pathname === "/trace" && req.method === "POST") {
+    const { what, detail } = await readBody(req);
+    const line = `${new Date().toISOString().slice(11, 19)}  ${what}${detail ? `  ${detail}` : ""}`;
+    trace.push(line);
+    while (trace.length > 300) trace.shift();
+    console.log(`   · ${line}`);
+    fs.appendFile(TRACE_FILE, `${line}\n`, () => {});
+    return send(res, 204, "");
+  }
+
+  if (url.pathname === "/trace") {
+    return send(res, 200, trace.join("\n") || "nothing yet", "text/plain; charset=utf-8");
+  }
+
+  // Change what we are working on. Everything after this happens there.
+  if (url.pathname === "/project" && req.method === "POST") {
+    const { name } = await readBody(req);
+    const known = Object.keys(PROJECTS);
+    const wanted = String(name ?? "").toLowerCase().trim().replace(/^(the|my)\s+/, "");
+
+    // Longest name first, so "the voice claude app" is not read as "the voice".
+    const match =
+      EVERY_PROJECT_NAME.find(({ said }) => said.replace(/^(the|my)\s+/, "") === wanted)?.name ??
+      // Failing that, the giveaway word: whatever dictation did to the rest of it,
+      // "voice" belongs to exactly one project.
+      Object.entries(GIVEAWAY_WORDS).find(([, words]) =>
+        words.some((word) => wanted.split(/\s+/).includes(word)),
+      )?.[0];
+
+    if (!match) {
+      return send(res, 404, { error: `I don't know ${name}`, projects: known });
+    }
+
+    project = PROJECTS[match].at;
+    // Its memory is of the other project, and carrying that across would be worse
+    // than useless — it would answer about the wrong code with total confidence.
+    forgetConversation();
+    console.log(`\n== now working on ${match} — ${project}`);
+    return send(res, 200, { project: match, at: project });
+  }
+
+  if (url.pathname === "/project") {
+    return send(res, 200, { project: nameOf(project), at: project, projects: Object.keys(PROJECTS) });
+  }
+
+  // Asked for out loud, or by whatever just changed the code.
+  if (url.pathname === "/restart" && req.method === "POST") {
+    const { why } = await readBody(req);
+    send(res, 200, { restarting: true });
+    startAgain(why || "asked to");
+    return;
+  }
+
+  // Start the drive over. In realtime mode this happens as a side effect of asking
+  // for a fresh credential; in split mode there is no credential, so it is its own
+  // request.
+  if (url.pathname === "/new" && req.method === "POST") {
+    forgetConversation();
+    console.log("  starting a fresh conversation");
+    return send(res, 200, { ok: true });
   }
 
   if (url.pathname === "/stop" && req.method === "POST") {
@@ -215,9 +493,20 @@ const server = net.createServer((socket) => {
 
 server.listen(PORT, () => {
   console.log(`\nvoice-claude is up.`);
-  console.log(`Working on:  ${PROJECT_DIR}`);
-  console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
-  console.log(`\nOpen this on the phone, on the same wifi:`);
+  console.log(`Working on:  ${nameOf(project)} — ${project}`);
+  if (MODE === "realtime") {
+    console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);
+    console.log(`Cost:        billed per minute of audio, both directions.`);
+  } else {
+    const mouth = speaker === "mac" ? `this Mac, ${SPEAKER_VOICE}` : "the phone's own voice";
+    console.log(`Hearing:     the phone's own dictation`);
+    console.log(`Speaking:    ${mouth}`);
+    console.log(`Cost:        nothing beyond the Claude subscription.`);
+    // Loading the voice takes a few seconds. Do it now, not when someone is waiting.
+    if (speaker === "mac") warmUp();
+  }
+  console.log(`\nOpen this on the phone:`);
   for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
   console.log(`\nSafari will warn about the certificate the first time. Accept it.\n`);
+  watchOwnCode();
 });

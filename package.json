@@ -5,10 +5,15 @@
   "type": "module",
   "description": "A spoken front end to Claude Code, for reviewing and steering code while driving.",
   "scripts": {
-    "start": "node server/index.mjs",
+    "start": "bash scripts/run.sh",
+    "check": "node server/self-check.mjs",
+    "voice:install": "bash scripts/install-voice.sh",
+    "start:paid": "VOICE_CLAUDE_MODE=realtime bash scripts/run.sh",
     "subscription:check": "node server/subscription-cli.mjs --check",
     "claude:subscription": "node server/subscription-cli.mjs",
-    "claude:new": "node server/subscription-cli.mjs --new"
+    "claude:new": "node server/subscription-cli.mjs --new",
+    "start:once": "node server/index.mjs",
+    "score": "node scripts/score.mjs"
   },
   "engines": {
     "node": ">=22"
