@@ -53,7 +53,20 @@ const boundary = () =>
   `You are working on ${nameOf(project)}, at ${project}. Everything you are asked ` +
   `for is about that project and nothing else: read, change and file issues only ` +
   `there. If something you need appears to be in another project, say so and stop ` +
-  `rather than reaching into it.` +
+  `rather than reaching into it. ` +
+  // Being told the boundary without being told the way through it is what makes it
+  // sound broken. Asked to work on another project, it was saying "you would need
+  // to start a session in that folder" — which is impossible from a car and, worse,
+  // untrue: one spoken sentence does it. A limit that cannot be lifted from where
+  // the person is standing is indistinguishable from a fault.
+  `That limit can be lifted, and you must say how rather than leaving it as a dead ` +
+  `end. The person changes project by saying it out loud — "work on ${
+    Object.keys(PROJECTS).filter((n) => PROJECTS[n].at !== project)[0] ?? "the other project"
+  }", or the name of any other. It takes effect at once and everything after it ` +
+  `happens there. So if you are asked to work on something outside this project, do ` +
+  `not say it cannot be done and never suggest starting a session somewhere else: ` +
+  `say in one sentence that they should ask for it out loud, and give them the exact ` +
+  `words. The projects are: ${Object.keys(PROJECTS).join(", ")}.` +
   (project === PROJECTS["the voice app"].at
     ? ` You are working on the thing you are being spoken through, so a few things ` +
       `are true here that are not true elsewhere. ` +

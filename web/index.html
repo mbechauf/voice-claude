@@ -749,6 +749,7 @@ const POLITENESS = new Set([
   "can", "could", "would", "will", "please", "you", "we", "lets", "let's", "let",
   "ok", "okay", "right", "now", "so", "and", "then", "hey", "just", "maybe",
   "actually", "um", "uh", "er", "well", "i", "want", "need", "wanna", "like",
+  "no", "yes", "yeah", "to", "still", "wanted", "gonna", "going", "try", "trying",
 ]);
 
 function makePhraseReader(phrases) {
@@ -796,7 +797,20 @@ function makePhraseReader(phrases) {
         // "the start" means what a person means by it, politeness included.
         const onlyPolitenessBefore = pending.slice(0, i).every((word) => POLITENESS.has(word));
         const atAnEdge = onlyPolitenessBefore || i + found?.words.length === pending.length;
-        const said = found && atAnEdge ? found : null;
+
+        // A command that needs a name after it does not need the edge rule at all,
+        // and this is the point: the edge rule exists because a bare phrase is
+        // ambiguous, and a phrase followed by the name of one of your own projects
+        // is not. "Can you work on the login bug" cannot switch anywhere, because
+        // there is no such project; "no I want to switch to the voice app" plainly
+        // can, wherever in the sentence it sits.
+        //
+        // Guessing which words count as throat-clearing has now failed three times —
+        // "can you", then "ok so could you please", then "no I want to". Each fix
+        // was a longer list, which is not a fix. This removes the guess for the one
+        // command where something better is available.
+        const carriesItsOwnProof = found?.name === "project";
+        const said = found && (atAnEdge || carriesItsOwnProof) ? found : null;
 
         if (said) {
           // The politeness in front of an instruction was never part of a question,

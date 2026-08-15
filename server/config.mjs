@@ -177,6 +177,10 @@ export const PHRASES = {
     // "go to" is deliberately absent: two-letter words are too easy to mishear into,
     // and it read "does it send it to the server" as an instruction.
     "change to", "move to", "over to the",
+    // Cheap to add, because a switch only counts when a real project is named after
+    // it. Wordings for the other commands cost something — they can appear inside a
+    // question — but these cannot fire on their own.
+    "back to", "let's do", "lets do", "do the", "onto the", "look at the",
   ],
 
   // Which one are we on? Answered by the phone, never by Claude.

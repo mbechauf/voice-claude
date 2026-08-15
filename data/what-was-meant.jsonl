@@ -48,6 +48,10 @@
 {"said": "ok so could you please switch to the voice app", "meant": "project"}
 {"said": "let's do the advisor app now", "meant": "project"}
 {"said": "back to the advisor", "meant": "project"}
+{"said": "no i want to switch to the cloth voice app", "meant": "project", "from": "real", "note": "fell through three times; the filler list did not have no, want, to"}
+{"said": "i want you to switch to the cloud voice app", "meant": "project", "from": "real"}
+{"said": "no i want you to switch to the claude voice app", "meant": "project", "from": "real"}
+{"said": "yeah it's a piece of work that we've been working on which is the claude voice app", "meant": "none", "from": "real", "note": "names the project but is describing it, not asking to switch"}
 
 {"said": "what project are we on", "meant": "where"}
 {"said": "which project is this", "meant": "where"}

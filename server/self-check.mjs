@@ -132,7 +132,9 @@ function checkTheGate(livePhrases) {
   const real = [
     ["sending", ["what changed in the last commit", "all done"], "what changed in the last commit | SEND"],
     ["sending when it arrives in pieces", ["what changed", "all", "done"], "what changed | SEND"],
-    ["starting the question again", ["no scratch that", "what about the tests"], "no | WIPE | what about the tests"],
+    // "no" is now treated as throat-clearing in front of an instruction and dropped,
+    // rather than passed on to Claude as part of the question. That is the intent.
+    ["starting the question again", ["no scratch that", "what about the tests"], "WIPE | what about the tests"],
     ["a question about sending things is not a send", ["does it send it to the server"], "does it send it to the server"],
     ["a question containing all", ["are all the tests passing"], "are all the tests passing"],
     ["a question containing done", ["is the migration done yet"], "is the migration done yet"],
@@ -144,7 +146,11 @@ function checkTheGate(livePhrases) {
     ["taking back the last thing said", ["and check the tests", "take that back"], "and check the tests | UNDO"],
     ["taking it back in pieces", ["take that", "back"], "UNDO"],
     ["a question about taking things back is not the command", ["can you roll that back for me"], "can you roll that back for me"],
-    ["a question mentioning back", ["put the old version back"], "put the old version back"],
+    // "back" is held at the end of a piece of speech, because it could still become
+    // "back to the advisor app". It is shown on screen while held and delivered the
+    // moment the next words arrive, so nothing is lost — but it is not delivered
+    // inside this one chunk, and the test says so honestly.
+    ["a question mentioning back", ["put the old version back"], "put the old version | back"],
     ["another way of saying send", ["check the tests", "that's it"], "check the tests | SEND"],
     ["and another", ["check the tests", "over to you"], "check the tests | SEND"],
     ["read misheard as rep", ["rep prompt"], "READ"],
@@ -175,7 +181,7 @@ function checkTheGate(livePhrases) {
     ["another way of asking", ["help me out"], "HELP"],
     ["and another", ["say the commands"], "HELP"],
     ["asking for help with the code is not the command", ["can you help me with this test"], "can you help me with this test"],
-    ["a question about what something can say", ["what can the server say back"], "what can the server say back"],
+    ["a question about what something can say", ["what can the server say back"], "what can the server say | back"],
   ];
 
   for (const [name, chunks, expected] of real) {
