@@ -310,6 +310,12 @@ export const ALLOWED_TOOLS = [
   // widen its own permissions has none. Widening it is a decision made here, awake.
   "Bash(npm run check:*)",
   "Bash(npm test:*)",
+
+  // Putting its own change into effect. It watches its own files and usually
+  // notices, but "usually" is not something to explain to someone driving, and
+  // asking them to restart it is asking them to do the one thing they cannot.
+  "Bash(npm run restart:*)",
+  "Bash(npm run score:*)",
 ];
 
 // How long to let a single piece of work run before giving up on it.

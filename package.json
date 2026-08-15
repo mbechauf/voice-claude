@@ -13,7 +13,8 @@
     "claude:subscription": "node server/subscription-cli.mjs",
     "claude:new": "node server/subscription-cli.mjs --new",
     "start:once": "node server/index.mjs",
-    "score": "node scripts/score.mjs"
+    "score": "node scripts/score.mjs",
+    "restart": "node scripts/restart.mjs"
   },
   "engines": {
     "node": ">=22"

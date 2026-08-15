@@ -46,16 +46,20 @@ underneath changed; falling over means start again, more slowly each time, becau
 restarts instantly hides the crash.
 
 Half of this system runs in the browser, and restarting the Mac does nothing for that half. So the
-Mac says which page it now has, and the phone notices when it is running an older one. An idle page
-reloads at once. A page mid-drive says so and waits, because an iPhone only lets a page make sound
-through a channel opened by a tap—and a reload closes it. Being struck silent at seventy miles an
-hour is worse than running yesterday's code for another minute. Say **"load the new page"** when you
-are somewhere you can tap. The question in progress is carried across.
+Mac says which page it now has, and the phone notices when it is running an older one. When the Mac restarts, the phone reloads with it. If the page notices a newer version some other
+way, say **"load the new page"** to take it. Either way the question in progress is carried across.
 
 It restarts itself when its own code changes, but never while Claude is working—interrupting an
-answer to pick up an edit is a poor trade. Say **"start yourself again"** to force it. The phone
-rides it out and says what is happening, because otherwise a restart looks exactly like the thing
-breaking. Set `VOICE_CLAUDE_WATCH=off` to only ever restart when asked.
+answer to pick up an edit is a poor trade. Say **"start yourself again"**, or run `npm run restart`,
+to force it. Claude is told to run that itself after changing this app, and told never to ask you to
+restart it: you are driving and cannot. Set `VOICE_CLAUDE_WATCH=off` to only ever restart when asked.
+
+**The phone reloads with it.** Half of this runs in the browser, so a page left on the old code after
+the Mac has moved on is the genuinely confusing state—the two halves disagree and nothing says so. It
+waits for the Mac to come back, then loads itself again, carrying the question in progress across.
+The one thing that cannot survive a reload is permission to make sound, so it comes back saying that
+a single tap brings the voice back. That tap is unavoidable: an iPhone only lets a page make sound
+through a channel a tap opened, and reloading closes it.
 
 `npm run voice:install` needs Homebrew, and installs an older Python and some pronunciation data
 alongside the voice itself. If the voice is missing when the server starts, it says so and falls

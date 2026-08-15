@@ -143,6 +143,36 @@ async function checkForANewPage({ reloadIfIdle }) {
   }
 }
 
+// The Mac is about to come back with new code, and half of this system is here in
+// the browser. Staying on the old page after that is the confusing state: the two
+// halves disagree, and nothing says so. So it waits for the Mac and then loads
+// itself again — which is also the only way the browser picks up new code at all.
+//
+// The cost is real and unavoidable: an iPhone only lets a page make sound through a
+// channel opened by a tap, and a reload closes it. So it comes back saying, in large
+// letters, that one tap brings the voice back — and carrying whatever question was
+// being built when the ground moved.
+async function comeBackFresh() {
+  const keep = questionInProgress();
+  for (let tries = 0; tries < 40; tries += 1) {
+    await new Promise((resume) => setTimeout(resume, 500));
+    try {
+      const answer = await fetch("/setup", { cache: "no-store" });
+      if (!answer.ok) continue;
+      trace("THE MAC IS BACK — RELOADING");
+      loadTheNewPage(keep);
+      return;
+    } catch {
+      // still down; that is what we are waiting for
+    }
+  }
+  setState("the Mac has not come back — tap to try again");
+}
+
+// Set by the front end, so the reload can carry the question across without this
+// having to know how the front end keeps it.
+let questionInProgress = () => "";
+
 function loadTheNewPage(keep = "") {
   try {
     if (keep) sessionStorage.setItem(KEPT, keep);
@@ -168,6 +198,7 @@ function listenForResults(handle) {
       log(`the app is restarting — ${text}`, "work");
       setState("restarting…");
       wasRestarting = true;
+      comeBackFresh();
       return;
     }
 
@@ -1655,6 +1686,7 @@ function splitFrontEnd() {
       });
       if (!ears) throw new Error("This browser has no built-in dictation. Use Safari on the phone.");
 
+      questionInProgress = () => question.join(" ");
       listenForResults(fromClaude);
       ears.start();
       goBtn.disabled = false;
@@ -1968,11 +2000,22 @@ document.addEventListener("visibilitychange", () => {
   if (running && document.visibilityState === "visible") holdScreenAwake();
 });
 
-setState(
-  setup.mode === "realtime"
-    ? `ready — paid voice, working on ${setup.project}`
-    : `ready — free voice, working on ${setup.project}`
-);
+let carriedOver = "";
+try { carriedOver = sessionStorage.getItem(KEPT) ?? ""; } catch {}
+
+if (carriedOver) {
+  // It reloaded under you. The one thing that cannot survive a reload is permission
+  // to make sound, so this is the only moment a tap is genuinely required.
+  promptEl.textContent = carriedOver;
+  setState("new version loaded — tap once to get the voice back");
+  goBtn.textContent = "Tap to carry on";
+} else {
+  setState(
+    setup.mode === "realtime"
+      ? `ready — paid voice, working on ${setup.project}`
+      : `ready — free voice, working on ${setup.project}`
+  );
+}
 
 function backToStopped() {
   running = false;

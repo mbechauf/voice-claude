@@ -55,10 +55,19 @@ const boundary = () =>
   `there. If something you need appears to be in another project, say so and stop ` +
   `rather than reaching into it.` +
   (project === PROJECTS["the voice app"].at
-    ? ` You are working on the thing you are being spoken through. What the phone ` +
-      `decided, moment by moment, is in .voice-claude/trace.log — read it rather than ` +
-      `guessing at why something behaved oddly. Running "npm run check" is allowed ` +
-      `and is how you find out whether a change is any good.`
+    ? ` You are working on the thing you are being spoken through, so a few things ` +
+      `are true here that are not true elsewhere. ` +
+      `What the phone decided, moment by moment, is in .voice-claude/trace.log — read ` +
+      `it rather than guessing at why something behaved oddly. ` +
+      `"npm run check" tells you whether you have broken anything and "npm run score" ` +
+      `tells you whether it still understands what people say; both are allowed and ` +
+      `both are worth running after a change. ` +
+      `A change to this app does not take effect until it starts again. It watches ` +
+      `its own files and usually restarts on its own, but do not rely on that and ` +
+      `never ask the person to restart it — they are driving and cannot. When you ` +
+      `have finished changing something, run "npm run restart" yourself, and say ` +
+      `plainly that you have done so. It comes back within a second or two and the ` +
+      `phone reloads itself, so nothing is lost.`
     : "");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
