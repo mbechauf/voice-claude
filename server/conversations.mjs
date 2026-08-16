@@ -28,29 +28,61 @@ function where() {
 // Below this it is the same sitting and needs no announcement.
 const LONG_GAP_MS = 6 * 60 * 60 * 1000;
 
+// How stale the "last used" stamp is allowed to get before it is worth writing again.
+// It only decides how far back "picking up where we left off" reaches, so a minute of
+// drift costs nothing, while rewriting on every scrap of streamed work costs plenty.
+const STAMP_EVERY_MS = 60 * 1000;
+
+// Missing and damaged are NOT the same thing, and treating them as the same is how a
+// project loses work it left behind. Missing means there is nothing to keep. Damaged
+// means there is something and we cannot read it — and the one thing never to do then
+// is write a fresh store over the top, because that turns "unreadable" into "gone".
+// Returns null for damaged, an object otherwise.
 function load() {
+  let raw;
   try {
-    const parsed = JSON.parse(fs.readFileSync(where(), "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : {};
+    raw = fs.readFileSync(where(), "utf8");
   } catch {
-    // Missing or damaged is the same thing here: no memory, start clean. A corrupt
-    // file must never stop the app dead at the roadside.
-    return {};
+    return {}; // genuinely nothing there yet
+  }
+  if (!raw.trim()) return null; // an empty file is a half-written one, not an empty store
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
   }
 }
 
+// Written to one side and then moved into place in a single step, so a reader can
+// never catch it half-written. The old way — writing straight over the top — left a
+// window in which the store looked empty, and anything that read it in that window
+// concluded there was nothing remembered at all.
 function save(all) {
   try {
-    fs.mkdirSync(path.dirname(where()), { recursive: true });
-    fs.writeFileSync(where(), `${JSON.stringify(all, null, 2)}\n`);
+    const file = where();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const scratch = `${file}.writing`;
+    fs.writeFileSync(scratch, `${JSON.stringify(all, null, 2)}\n`);
+    fs.renameSync(scratch, file);
   } catch (err) {
     console.error(`couldn't remember the conversation: ${err.message}`);
   }
 }
 
+// A store we cannot read is put to one side rather than thrown away, so the ids in it
+// can still be dug out by hand. Then we may start clean with a clear conscience.
+function setAside() {
+  try {
+    fs.renameSync(where(), `${where()}.unreadable`);
+  } catch {
+    // Nothing to move, or nowhere to move it. Either way, carry on.
+  }
+}
+
 /** The conversation last used for this project, or null. */
 export function recall(project) {
-  const kept = load()[project];
+  const kept = load()?.[project];
   if (!kept?.id) return null;
   return { id: kept.id, at: kept.at ?? null };
 }
@@ -58,7 +90,20 @@ export function recall(project) {
 /** Tie this conversation to this project, and stamp it as used just now. */
 export function remember(project, id, now = new Date()) {
   if (!id) return;
-  const all = load();
+  let all = load();
+  if (!all) {
+    // Unreadable. Keep the old one where a human can still get at it, and say so out
+    // loud in the log, rather than quietly writing a store with one project in it and
+    // leaving every other project's work looking as though it never happened.
+    console.error("the remembered conversations couldn't be read; keeping the old file aside");
+    setAside();
+    all = {};
+  }
+  const existing = all[project];
+  // Nothing to write when it is already this conversation and was stamped a moment
+  // ago. The work streams back in dozens of pieces and each one used to rewrite the
+  // whole store, which is a lot of chances to be caught mid-write for no gain.
+  if (existing?.id === id && existing.at && now - new Date(existing.at) < STAMP_EVERY_MS) return;
   all[project] = { id, at: now.toISOString() };
   save(all);
 }
@@ -66,6 +111,11 @@ export function remember(project, id, now = new Date()) {
 /** Deliberately start over — this project only, never the others. */
 export function forget(project) {
   const all = load();
+  if (!all) {
+    // Damaged, and the ask was to start clean anyway. Put it aside and be done.
+    setAside();
+    return;
+  }
   if (!(project in all)) return;
   delete all[project];
   save(all);

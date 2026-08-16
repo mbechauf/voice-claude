@@ -78,8 +78,11 @@ export function stopWork() {
  * `briefing` is how Claude is told to answer — plain spoken sentences rather than a
  * written report. It only goes out on the first request of a conversation, because
  * every later one continues that same conversation and Claude still has it.
+ *
+ * `standing` is the one thing that cannot be said once: which project we are on. It
+ * rides along with every later question instead.
  */
-export function startWork(request, emit, { briefing = "", project = STARTING_PROJECT } = {}) {
+export function startWork(request, emit, { briefing = "", standing = "", project = STARTING_PROJECT } = {}) {
   if (current) stopWork();
 
   const kept = recall(project);
@@ -90,14 +93,26 @@ export function startWork(request, emit, { briefing = "", project = STARTING_PRO
   const gap = kept ? gapPhrase(kept.at) : null;
   if (gap) emit("progress", `picking up where we left off ${gap}`);
 
-  launch({ request, emit, briefing, project, resume: kept?.id ?? null, alreadyRetried: false });
+  launch({ request, emit, briefing, standing, project, resume: kept?.id ?? null, alreadyRetried: false });
 }
 
 // One attempt. Split out from the above because a stored conversation can turn out to
 // be unusable — cleared away, too old, a machine reinstalled — and the honest answer
 // to that is to start a clean one and say so, not to fail at the roadside.
-function launch({ request, emit, briefing, project, resume, alreadyRetried }) {
-  const opening = briefing && !resume ? `${briefing}\n\n---\n\n${request}` : request;
+// Which project we are on goes out with every single question, not just the first. It
+// used to be said once, inside the briefing, and never again — so a wrong belief about
+// where we were could survive the entire conversation with nothing able to contradict
+// it. That is not hypothetical: Claude announced a project switch that had not
+// happened and then worked in the wrong folder for twenty minutes. Repeating it costs
+// one line, and means a wrong belief cannot outlive the next question.
+export function openingFor({ request, briefing = "", standing = "", resume = null }) {
+  return [briefing && !resume ? `${briefing}\n\n---` : standing, request]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function launch({ request, emit, briefing, standing, project, resume, alreadyRetried }) {
+  const opening = openingFor({ request, briefing, standing, resume });
 
   const args = [
     "-p",
@@ -213,7 +228,7 @@ function launch({ request, emit, briefing, project, resume, alreadyRetried }) {
       // and the person should hear why the answer arrives without any history behind it.
       forget(project);
       emit("progress", "I couldn't pick up our old conversation, so I'm starting fresh");
-      launch({ request, emit, briefing, project, resume: null, alreadyRetried: true });
+      launch({ request, emit, briefing, standing, project, resume: null, alreadyRetried: true });
     } else {
       const hint = stderr.trim().split("\n").pop() ?? "";
       emit("error", `Something went wrong on my machine. ${hint}`.trim());
