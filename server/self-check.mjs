@@ -8,6 +8,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { isInstalled as tidyUpInstalled, whyNotToTrust } from "./cleanup.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 const PORT = 8799; // not the real one, so this never fights a live session
@@ -215,6 +217,34 @@ function checkTheGate(livePhrases) {
 // The noises people make while thinking should never reach Claude, and taking them
 // out must not take any meaning with them. The two halves of that are tested
 // together: what comes out, and what must stay in.
+// The tidy-up rewrites what somebody said before Claude acts on it, and the only
+// thing standing between a small model having an off day and an instruction that
+// nobody gave is this. It is checked without the model, on purpose: the cases that
+// matter are the ones the model produces rarely, and waiting for one to happen is
+// not a test.
+function checkTheGuard() {
+  const words = ["Claude", "Claude Code", "trace log"];
+  const cases = [
+    ["ordinary tidying is trusted", "um can you check the tests", "Can you check the tests?", true],
+    ["a hesitation removed is trusted", "so like what does the gate do", "What does the gate do?", true],
+    ["a word repaired by sound is trusted", "look at the cloud code bridge", "Look at the Claude Code bridge.", true],
+    ["a word invented is refused", "the meeting is at two sorry three pm", "The meeting is at two and three pm.", false],
+    ["an instruction invented is refused", "have a look at the tests", "Have a look at the tests and delete the old ones.", false],
+    ["half the sentence lost is refused", "check the tests and then look at the login bug and the trace log", "Check the tests.", false],
+    ["a spoken word used twice over is refused", "no not yet is that a model he created", "No, not yet \u2014 that's not a model he created.", false],
+    ["answering instead of repairing is refused", "what does the gate do", "Sure! The gate decides what reaches Claude.", false],
+    ["nothing at all is refused", "what does the gate do", "", false],
+  ];
+
+  for (const [name, heard, repaired, shouldTrust] of cases) {
+    const why = whyNotToTrust(heard, repaired, words);
+    const trusted = why === "";
+    check(`the guard: ${name}`, trusted === shouldTrust, trusted ? "trusted" : why);
+  }
+
+  check("the tidy-up never stops a question", typeof tidyUpInstalled() === "boolean");
+}
+
 function checkFillerComesOut() {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
   const parts = [/const NOISES = [\s\S]*?\];/, /const STALLS = [\s\S]*?\n\];/, /function withoutFiller[\s\S]*?\n}/]
@@ -450,6 +480,7 @@ try {
   );
 
   checkItKnowsItsOwnVoice();
+  checkTheGuard();
   checkFillerComesOut();
   checkFinishedThoughts();
   checkTheGate(setup.phrases);

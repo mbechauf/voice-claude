@@ -34,6 +34,11 @@ import {
 } from "./config.mjs";
 import { forgetConversation, isBusy, startWork, stopWork } from "./claude-bridge.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
+import {
+  cleanUp,
+  isInstalled as tidyUpInstalled,
+  warmUp as warmUpTidyUp,
+} from "./cleanup.mjs";
 
 // ------------------------------------------------------------- what we are on
 //
@@ -195,6 +200,17 @@ try {
   console.error(`couldn't open the log: ${err.message}`);
 }
 
+// One line in that log. The phone sends most of them, but the Mac decides things too
+// now — what it made of a mangled sentence, and when it decided not to trust itself —
+// and those belong in the same place, in order, or neither half explains the other.
+function note(what, detail) {
+  const line = `${new Date().toISOString().slice(11, 19)}  ${what}${detail ? `  ${detail}` : ""}`;
+  trace.push(line);
+  while (trace.length > 300) trace.shift();
+  console.log(`   · ${line}`);
+  fs.appendFile(TRACE_FILE, `${line}\n`, () => {});
+}
+
 function broadcast(kind, text) {
   const payload = `data: ${JSON.stringify({ kind, text })}\n\n`;
   for (const res of listeners) res.write(payload);
@@ -337,12 +353,47 @@ async function handle(req, res) {
     }
   }
 
+  // One piece of a sentence, tidied while the person is still talking. The phone asks
+  // for this at every pause, so by the time it is sent almost everything has already
+  // been through here and the only wait left is the tail end of the last breath.
+  if (url.pathname === "/tidy" && req.method === "POST") {
+    const { heard } = await readBody(req);
+    if (!heard) return send(res, 400, { error: "nothing to tidy" });
+    const tidied = await cleanUp(heard, { project });
+    if (tidied.changed) note("tidied up a piece", `"${heard}" → "${tidied.text}"`);
+    else if (tidied.why) note("kept a piece as heard", tidied.why);
+    return send(res, 200, { text: tidied.text, changed: tidied.changed, why: tidied.why ?? "" });
+  }
+
   if (url.pathname === "/ask" && req.method === "POST") {
-    const { request } = await readBody(req);
+    const { request, alreadyTidied } = await readBody(req);
     if (!request) return send(res, 400, { error: "no request" });
     console.log(`\n→ ${request}`);
+
+    // Repaired here rather than on the phone, and after the gate rather than before
+    // it. The phone has to decide what is a command the instant it is said, and it
+    // does that by sound; this only has to be right about a finished question, and it
+    // can afford a third of a second to be right about the whole of it.
+    //
+    // Unless the phone already had every piece tidied at the pauses, which is the
+    // usual case and the whole point of doing it there: repairing it twice would put
+    // the delay back exactly where it was taken out of.
+    const tidied = alreadyTidied
+      ? { text: request, changed: false, why: "" }
+      : await cleanUp(request, { project });
+    if (tidied.changed) {
+      console.log(`✓ ${tidied.text}`);
+      note("tidied up", `"${request}" → "${tidied.text}"`);
+      // Send it back so the phone can show what was actually asked. Without this the
+      // repair is invisible from the driver's seat, and a repair nobody can see reads
+      // exactly like a repair that never happened.
+      broadcast("tidied", tidied.text);
+    } else if (tidied.why) {
+      note("kept it as heard", tidied.why);
+    }
+
     startWork(
-      request,
+      tidied.text,
       (kind, text) => {
         console.log(`  ${kind}: ${text.slice(0, 120)}`);
         broadcast(kind, text);
@@ -357,11 +408,7 @@ async function handle(req, res) {
   // of the symptom wastes drives.
   if (url.pathname === "/trace" && req.method === "POST") {
     const { what, detail } = await readBody(req);
-    const line = `${new Date().toISOString().slice(11, 19)}  ${what}${detail ? `  ${detail}` : ""}`;
-    trace.push(line);
-    while (trace.length > 300) trace.shift();
-    console.log(`   · ${line}`);
-    fs.appendFile(TRACE_FILE, `${line}\n`, () => {});
+    note(what, detail);
     return send(res, 204, "");
   }
 
@@ -521,11 +568,16 @@ server.listen(PORT, () => {
     console.log(`Cost:        billed per minute of audio, both directions.`);
   } else {
     const mouth = speaker === "mac" ? `this Mac, ${SPEAKER_VOICE}` : "the phone's own voice";
+    const tidying = tidyUpInstalled()
+      ? "a small model on this Mac"
+      : `not installed — run "npm run cleanup:install"`;
     console.log(`Hearing:     the phone's own dictation`);
+    console.log(`Tidying up:  ${tidying}`);
     console.log(`Speaking:    ${mouth}`);
     console.log(`Cost:        nothing beyond the Claude subscription.`);
-    // Loading the voice takes a few seconds. Do it now, not when someone is waiting.
+    // Loading these takes a few seconds. Do it now, not when someone is waiting.
     if (speaker === "mac") warmUp();
+    warmUpTidyUp();
   }
   console.log(`\nOpen this on the phone:`);
   for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
