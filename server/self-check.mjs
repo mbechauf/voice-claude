@@ -393,6 +393,20 @@ async function checkItRemembersPerProject() {
     check("starting fresh clears the project you are on", recall("/a") === null);
     check("starting fresh leaves the other projects alone", recall("/b")?.id === "bbb");
 
+    // The failure that started all this: one project used hard while another sits
+    // there, and the one sitting there quietly disappears.
+    remember("/a", "aaa");
+    for (let i = 0; i < 50; i += 1) remember("/b", "bbb", new Date(Date.now() + i * 60_001));
+    check("using one project heavily never loses another", recall("/a")?.id === "aaa");
+
+    // A half-written store used to read as an empty one, and the next write made that
+    // permanent. Now it is kept where it can still be salvaged.
+    fs.writeFileSync(scratch, '{"/a": {"id": "aa');
+    remember("/c", "ccc");
+    check("a damaged store is set aside, not written over", fs.existsSync(`${scratch}.unreadable`));
+    check("a damaged store does not stop the new conversation being kept", recall("/c")?.id === "ccc");
+    fs.rmSync(`${scratch}.unreadable`, { force: true });
+
     const now = new Date("2026-08-15T12:00:00Z");
     check("a conversation from minutes ago is picked up silently",
       gapPhrase(new Date("2026-08-15T11:30:00Z").toISOString(), now) === null);
