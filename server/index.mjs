@@ -33,6 +33,7 @@ import {
   WHAT_EACH_DOES,
 } from "./config.mjs";
 import { forgetConversation, isBusy, startWork, stopWork } from "./claude-bridge.mjs";
+import { recall } from "./conversations.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
   cleanUp,
@@ -345,7 +346,7 @@ async function handle(req, res) {
     try {
       // A fresh start wipes the slate; a reconnect after a dropped signal must not,
       // or a tunnel would cost you everything Claude had established.
-      if (url.searchParams.get("resume") !== "1") forgetConversation();
+      if (url.searchParams.get("resume") !== "1") forgetConversation(project);
       return send(res, 200, { secret: await mintVoiceToken(), model: VOICE_MODEL });
     } catch (err) {
       console.error(err);
@@ -436,9 +437,11 @@ async function handle(req, res) {
     }
 
     project = PROJECTS[match].at;
-    // Its memory is of the other project, and carrying that across would be worse
-    // than useless — it would answer about the wrong code with total confidence.
-    forgetConversation();
+    // Each project keeps its own conversation, so switching neither carries the old
+    // one across — which would answer about the wrong code with total confidence —
+    // nor throws it away. Come back later and the work you left here is still here.
+    const waiting = recall(project);
+    note("now working on", `${match}${waiting ? " — picking its conversation back up" : ""}`);
     console.log(`\n== now working on ${match} — ${project}`);
     return send(res, 200, { project: match, at: project });
   }
@@ -459,7 +462,7 @@ async function handle(req, res) {
   // for a fresh credential; in split mode there is no credential, so it is its own
   // request.
   if (url.pathname === "/new" && req.method === "POST") {
-    forgetConversation();
+    forgetConversation(project);
     console.log("  starting a fresh conversation");
     return send(res, 200, { ok: true });
   }

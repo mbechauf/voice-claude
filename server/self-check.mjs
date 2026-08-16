@@ -364,6 +364,51 @@ function checkPickingAProject(names) {
   }
 }
 
+// Remembering the conversation is only worth anything if it survives the app dying,
+// keeps the projects apart, and knows when it has nothing to offer. All three are
+// invisible from the driver's seat until the moment they are wrong.
+async function checkItRemembersPerProject() {
+  const scratch = path.join(root, ".voice-claude", "check-conversations.json");
+  process.env.VOICE_CLAUDE_MEMORY_FILE = scratch;
+  fs.rmSync(scratch, { force: true });
+
+  // Imported fresh each run so it reads the scratch file, not the real one.
+  const memory = await import(`./conversations.mjs?check=${results.length}`);
+  const { forget, gapPhrase, recall, remember } = memory;
+
+  try {
+    check("with nothing remembered, it starts clean", recall("/a") === null);
+
+    remember("/a", "aaa");
+    remember("/b", "bbb");
+    check("it hands back the same project's conversation", recall("/a")?.id === "aaa");
+    check("two projects never share a conversation", recall("/b")?.id === "bbb");
+
+    // The real test of it: the store is a file, so a fresh reader sees it too. That
+    // is exactly what happens when the app restarts.
+    const afterRestart = await import(`./conversations.mjs?restart=${results.length}`);
+    check("it survives the app restarting", afterRestart.recall("/a")?.id === "aaa");
+
+    forget("/a");
+    check("starting fresh clears the project you are on", recall("/a") === null);
+    check("starting fresh leaves the other projects alone", recall("/b")?.id === "bbb");
+
+    const now = new Date("2026-08-15T12:00:00Z");
+    check("a conversation from minutes ago is picked up silently",
+      gapPhrase(new Date("2026-08-15T11:30:00Z").toISOString(), now) === null);
+    check("a conversation from days ago says where it is picking up from",
+      Boolean(gapPhrase(new Date("2026-08-12T12:00:00Z").toISOString(), now)));
+
+    const { lostTheConversation } = await import("./claude-bridge.mjs");
+    check("it can tell a vanished conversation from a real failure",
+      lostTheConversation("Error: No conversation found with session ID abc") &&
+      !lostTheConversation("Error: you are out of credit"));
+  } finally {
+    fs.rmSync(scratch, { force: true });
+    delete process.env.VOICE_CLAUDE_MEMORY_FILE;
+  }
+}
+
 async function waitForServer() {
   for (let i = 0; i < 50; i += 1) {
     try {
@@ -485,6 +530,7 @@ try {
   checkFinishedThoughts();
   checkTheGate(setup.phrases);
   checkPickingAProject({ projectNames: setup.projectNames, giveaways: setup.giveaways });
+  await checkItRemembersPerProject();
 } finally {
   server.kill("SIGTERM");
 }
