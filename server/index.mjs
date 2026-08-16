@@ -66,13 +66,24 @@ const boundary = () =>
   // untrue: one spoken sentence does it. A limit that cannot be lifted from where
   // the person is standing is indistinguishable from a fault.
   `That limit can be lifted, and you must say how rather than leaving it as a dead ` +
-  `end. The person changes project by saying it out loud — "work on ${
+  `end. The words that lift it are "work on" (or "switch to") followed by the ` +
+  `project — "work on ${
     Object.keys(PROJECTS).filter((n) => PROJECTS[n].at !== project)[0] ?? "the other project"
-  }", or the name of any other. It takes effect at once and everything after it ` +
-  `happens there. So if you are asked to work on something outside this project, do ` +
-  `not say it cannot be done and never suggest starting a session somewhere else: ` +
-  `say in one sentence that they should ask for it out loud, and give them the exact ` +
-  `words. The projects are: ${Object.keys(PROJECTS).join(", ")}.` +
+  }", or the name of any other. ` +
+  // Saying only "they change project by saying it out loud" is what caused the fault
+  // this wording now guards against: a project merely NAMED in passing was read as a
+  // switch already made, and twenty minutes of work landed across the boundary. The
+  // name on its own does nothing, and the model is not the thing that performs it.
+  `The name on its own is not enough — naming a project while talking about it ` +
+  `changes nothing. You never perform the switch yourself, and you cannot tell from ` +
+  `what was said whether one happened. The app performs it, and every question you ` +
+  `are given begins by telling you which project you are on. That line is the only ` +
+  `truth about where you are; believe it over anything you inferred. Never announce ` +
+  `that the project has changed. ` +
+  `So if you are asked to work on something outside this project, do not say it ` +
+  `cannot be done and never suggest starting a session somewhere else: say in one ` +
+  `sentence the exact words that move it, and carry on where you are until a later ` +
+  `question tells you otherwise. The projects are: ${Object.keys(PROJECTS).join(", ")}.` +
   (project === PROJECTS["the voice app"].at
     ? ` You are working on the thing you are being spoken through, so a few things ` +
       `are true here that are not true elsewhere. ` +
@@ -88,6 +99,13 @@ const boundary = () =>
       `plainly that you have done so. It comes back within a second or two and the ` +
       `phone reloads itself, so nothing is lost.`
     : "");
+
+// The one fact that cannot be stated once and trusted afterwards. The briefing above
+// goes out only at the start of a conversation; this rides along with every question,
+// so a mistaken belief about where we are can never outlive the next thing said.
+const whereYouAre = (at = project) =>
+  `You are on ${nameOf(at)}, at ${at}. This line is the truth about where you are, ` +
+  `whatever was said before it.`;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -399,7 +417,7 @@ async function handle(req, res) {
         console.log(`  ${kind}: ${text.slice(0, 120)}`);
         broadcast(kind, text);
       },
-      { briefing: `${speakingRules}\n\n${boundary()}`, project },
+      { briefing: `${speakingRules}\n\n${boundary()}`, standing: whereYouAre(), project },
     );
     return send(res, 202, { started: true });
   }

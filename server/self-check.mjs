@@ -364,6 +364,50 @@ function checkPickingAProject(names) {
   }
 }
 
+// Claude cannot see which folder it is in. Everything it believes about where it is
+// comes from what it was told, so the telling has to be right on two counts: a bare
+// mention of a project must not read as a switch already made, and where we are must
+// be repeated rather than said once and trusted for the rest of the conversation.
+// Both were wrong on the drive of 2026-08-15 and work landed in the wrong project.
+async function checkItSaysWhereWeAre() {
+  // The wording first, because the fault was entirely in what it said. Naming a
+  // project used to be described as switching to it, which is how a passing mention
+  // became a switch the model believed had already happened.
+  const source = fs.readFileSync(path.join(root, "server", "index.mjs"), "utf8");
+  check(
+    "switching is described by the words that actually do it",
+    /"work on" \(or "switch to"\)/.test(source),
+  );
+  check(
+    "naming a project is not described as switching to it",
+    !/It takes effect at once/.test(source) && /never perform the switch yourself/.test(source),
+  );
+
+  const { openingFor } = await import("./claude-bridge.mjs");
+  if (typeof openingFor !== "function") {
+    check("what Claude is given can be examined", false, "the bridge no longer offers it");
+    return;
+  }
+
+  const asked = {
+    request: "what did we decide",
+    briefing: "SPEAK PLAINLY. You are on the advisor app.",
+    standing: "You are on the advisor app, at /somewhere.",
+  };
+
+  const resumed = openingFor({ ...asked, resume: "an-earlier-conversation" });
+  check(
+    "a continued conversation is still told where it is",
+    resumed.includes(asked.standing) && !resumed.includes("SPEAK PLAINLY"),
+  );
+
+  const first = openingFor({ ...asked, resume: null });
+  check(
+    "a fresh conversation gets the whole briefing",
+    first.includes("SPEAK PLAINLY") && first.endsWith(asked.request),
+  );
+}
+
 // Remembering the conversation is only worth anything if it survives the app dying,
 // keeps the projects apart, and knows when it has nothing to offer. All three are
 // invisible from the driver's seat until the moment they are wrong.
@@ -544,6 +588,7 @@ try {
   checkFinishedThoughts();
   checkTheGate(setup.phrases);
   checkPickingAProject({ projectNames: setup.projectNames, giveaways: setup.giveaways });
+  await checkItSaysWhereWeAre();
   await checkItRemembersPerProject();
 } finally {
   server.kill("SIGTERM");
