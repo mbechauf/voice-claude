@@ -343,6 +343,70 @@ export async function stillTalking(said) {
   }
 }
 
+// A summary is slower than everything else here and that is fine — it is said once
+// every half a minute, not on the way to an answer. But it still has to give up
+// eventually, or a wedged summary would keep the driver in silence indefinitely.
+const SO_FAR_PATIENCE_MS = 12_000;
+
+/**
+ * The account of what happened, with the written-down furniture taken out of it.
+ *
+ * Told a path, this model reads the path out. Told a line number, it reads that out
+ * too. The fix is not to ask it more nicely — it is a small model and it will keep
+ * doing it — but to hand it something that has no paths in it at all. What is left is
+ * the plain name of the file, which is the only part worth hearing anyway.
+ */
+export function inPlainWords(account) {
+  return String(account ?? "")
+    // A path becomes the name at the end of it, without the folders or the kind.
+    .replace(/\/?(?:[\w.@-]+\/)+([\w.@-]+)/g, (whole, last) => last.replace(/\.[a-z0-9]+$/i, "").replace(/[-_.]+/g, " "))
+    // A bare file name still carries its kind on the end, and that is said aloud too.
+    .replace(/\b([\w-]{2,})\.(mjs|js|ts|json|md|py|html|css|sh|yml|yaml|txt)\b/gi, (whole, name) => name.replace(/[-_]+/g, " "))
+    // Line numbers hanging off the end of a name are noise wherever they appear.
+    .replace(/:\d+(?::\d+)?\b/g, "")
+    .trim();
+}
+
+/**
+ * One spoken sentence about what has been going on, or nothing at all.
+ *
+ * This is the only place a model is asked to understand rather than to rewrite, and
+ * it is asked because nothing else can: the account is forty lines of half-finished
+ * evidence and what is wanted is the one thing a passenger would say about it. Where
+ * it fails, the caller still has the plain count of steps it had before.
+ */
+export async function soFar(account) {
+  const plain = inPlainWords(account);
+  if (!isInstalled() || !plain) return "";
+  try {
+    await ensureRunning();
+    const { text } = await askTheModel(
+      { text: plain, job: "so-far" },
+      SO_FAR_PATIENCE_MS,
+      { startAgainIfSlow: false },
+    );
+    return worthSaying(text);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Is this summary fit to be spoken? Returns it tidied, or nothing.
+ *
+ * A summary that has gone wrong has gone wrong in one of two ways: it has started
+ * writing a document, or it has started reading out symbols. Both are worse than the
+ * plain count of steps the phone can always fall back on.
+ */
+export function worthSaying(summary) {
+  const first = String(summary ?? "").trim().replace(/^["']|["']$/g, "");
+  if (!first) return "";
+  if (/[`{}<>[\]|#*_]|https?:/.test(first)) return "";
+  const words = first.split(/\s+/).filter(Boolean);
+  if (words.length < 4 || words.length > 60) return "";
+  return first;
+}
+
 /**
  * What they actually said. Always returns something usable, whatever went wrong.
  *

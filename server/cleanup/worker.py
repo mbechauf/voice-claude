@@ -19,11 +19,20 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 INSTRUCTIONS = HERE / "instructions.md"
 STILL_TALKING = HERE / "still-talking.md"
+SO_FAR = HERE / "so-far.md"
 
 # The smallest model that can do this at all, squeezed to a quarter of its size. It
 # is not being asked to think — only to write down what it was given, properly — and
 # a bigger one buys nothing but delay in a car.
 MODEL = "mlx-community/Qwen3-0.6B-4bit"
+
+# Saying what has been going on is a different job from writing a sentence out
+# properly, and the small model cannot do it — asked to summarise, it parrots the
+# input back. This one can, and the extra second it takes does not matter: the person
+# is told what happened every half a minute, not the instant it happens. It is loaded
+# only when the first summary is asked for, so nothing waits on it at startup and a
+# machine that never asks never pays for it.
+SUMMARY_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 
 
 def say(payload):
@@ -79,6 +88,9 @@ class Tidier:
         # whole judgement, so they are worked out once rather than every pause.
         self.more_token = self.tokenizer.encode("MORE", add_special_tokens=False)[0]
         self.done_token = self.tokenizer.encode("DONE", add_special_tokens=False)[0]
+        self.summary_model = None
+        self.summary_tokenizer = None
+        self.summary_rules = ""
         # No randomness. The same mangled sentence must come back the same way every
         # time, or a mistake seen once can never be chased down.
         self.sampler = make_sampler(temp=0.0)
@@ -118,6 +130,34 @@ class Tidier:
         # length of what was said has stopped repairing and started talking.
         room = max(48, int(len(self.tokenizer.encode(text)) * 2) + 24)
         return self.ask(self.instructions(words), self.shown, text, room)
+
+    def summariser(self):
+        """The bigger model, brought up the first time anybody wants a summary."""
+        if self.summary_model is None:
+            self.summary_model, self.summary_tokenizer = load(SUMMARY_MODEL)
+            self.summary_rules = SO_FAR.read_text().strip()
+        return self.summary_model, self.summary_tokenizer
+
+    def so_far(self, account):
+        model, tokenizer = self.summariser()
+        conversation = [
+            {"role": "system", "content": self.summary_rules},
+            {"role": "user", "content": account},
+        ]
+        prompt = tokenizer.apply_chat_template(conversation, add_generation_prompt=True)
+
+        started = time.time()
+        out = generate(
+            model,
+            tokenizer,
+            prompt=prompt,
+            # Two spoken sentences and no more. Room to run on is room to start
+            # writing a report, which is the thing this exists to avoid.
+            max_tokens=90,
+            sampler=self.sampler,
+            verbose=False,
+        )
+        return out.strip(), round((time.time() - started) * 1000)
 
     def still_talking(self, text):
         """How strongly it leans towards more being coming, from nought to one.
@@ -160,6 +200,13 @@ if __name__ == "__main__":
         print(f"\nheard:    {sentence}\nrepaired: {repaired}\n({took} ms)\n")
         sys.exit(0)
 
+    if "--so-far" in sys.argv:
+        account = sys.argv[sys.argv.index("--so-far") + 1]
+        tidier = Tidier()
+        summary, took = tidier.so_far(account)
+        print(f"\n{summary}\n({took} ms)\n")
+        sys.exit(0)
+
     if "--more" in sys.argv:
         tidier = Tidier()
         for sentence in sys.argv[sys.argv.index("--more") + 1 :]:
@@ -181,6 +228,8 @@ if __name__ == "__main__":
         try:
             if request.get("job") == "still-talking":
                 answer, took = tidier.still_talking(request.get("text", ""))
+            elif request.get("job") == "so-far":
+                answer, took = tidier.so_far(request.get("text", ""))
             else:
                 answer, took = tidier.tidy(request.get("text", ""), request.get("words") or [])
             say({"id": request.get("id"), "text": answer, "took": took})
