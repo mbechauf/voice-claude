@@ -1194,6 +1194,37 @@ function splitFrontEnd() {
     if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
   }
 
+  // How long to wait before asking, given what the words look like and what the model
+  // made of the whole question so far. Three lengths rather than two, because there
+  // are three answers: it reads as finished, it reads as unfinished, and there is
+  // somebody still building a list out of finished-looking sentences.
+  //
+  // The model's no counts for more than its yes, on purpose. Asking too early takes an
+  // action against half a question; waiting too long costs a beat and the send phrase,
+  // which is what happens today anyway. So "more is coming" pushes the wait right out,
+  // while "sounds finished" only shortens a long wait — it never overrides the words.
+  function waitBefore(finished, more) {
+    const soon = setup.offerAfter ?? 1_500;
+    const eventually = setup.offerAfterPause ?? 10_000;
+    if (more === true) return eventually;
+    if (finished) return soon;
+    if (more === false) return setup.offerAfterThought ?? 3_000;
+    return eventually;
+  }
+
+  // Ask the Mac what it makes of the pause. Costs nothing when the model is not there:
+  // no answer means no opinion, and no opinion is exactly today's behaviour.
+  function askAboutThePause(said) {
+    return fetch("/still-talking", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ said }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => (typeof r?.more === "boolean" ? r.more : null))
+      .catch(() => null);
+  }
+
   function maybeOfferToSend() {
     stopOffering();
     // Twice told no is a person who wants to keep talking. Stop asking until this
@@ -1210,8 +1241,8 @@ function splitFrontEnd() {
     // than someone mid-thought — and the cost of asking is one word.
     // Judged on the words as heard, not the tidy-up. The tidy-up puts a full stop on
     // the end of everything, and this is a test for a full stop.
-    const finished = soundsFinished(asHeard());
-    const beat = finished ? (setup.offerAfter ?? 1_500) : (setup.offerAfterPause ?? 10_000);
+    const said = asHeard();
+    const finished = soundsFinished(said);
     const offer = () => {
       offerTimer = null;
       if (waitingOn || working || live || reader.held()) return;
@@ -1226,7 +1257,21 @@ function splitFrontEnd() {
         sound.note("declined");
       });
     };
-    offerTimer = setTimeout(offer, beat);
+
+    // The clock starts on the words alone, so nothing waits on the Mac to answer. The
+    // model's opinion arrives a fraction of a second later and moves the clock — which
+    // is only ever worth doing while this is still the same question and the offer has
+    // not already been made. Anything said in the meantime has cancelled all of it.
+    const startedAt = Date.now();
+    offerTimer = setTimeout(offer, waitBefore(finished, null));
+    askAboutThePause(said).then((more) => {
+      if (more === null || !offerTimer) return;
+      if (asHeard() !== said) return;
+      const left = waitBefore(finished, more) - (Date.now() - startedAt);
+      trace("the pause", more ? "he is mid-thought, holding off" : "sounds like a finished thought");
+      clearTimeout(offerTimer);
+      offerTimer = setTimeout(offer, Math.max(300, left));
+    });
   }
 
   function show() {

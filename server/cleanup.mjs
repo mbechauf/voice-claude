@@ -37,6 +37,11 @@ const WORKER = path.join(here, "cleanup", "worker.py");
 // car notices. It normally takes about a third of a second.
 const PATIENCE_MS = 3_000;
 
+// The judgement is only worth having while the person is still paused, so it gets far
+// less rope than the tidy-up. A late answer about whether he had finished talking is
+// an answer about a moment that has gone.
+const STILL_TALKING_PATIENCE_MS = 1_200;
+
 export function isInstalled() {
   return fs.existsSync(PYTHON) && fs.existsSync(WORKER);
 }
@@ -262,6 +267,82 @@ export function warmUp() {
   ensureRunning().catch((err) => console.error(`tidy-up: ${err.message}`));
 }
 
+// One question to the model and back, or an honest failure. Everything either job
+// needs is here, because the difference between them is which sheet of instructions
+// the worker reads — not how the asking works.
+function askTheModel(payload, patience, { startAgainIfSlow = true } = {}) {
+  const id = nextId++;
+  const answer = new Promise((resolve, reject) => {
+    waiting.set(id, { resolve, reject });
+    setTimeout(() => {
+      if (!waiting.has(id)) return;
+      waiting.delete(id);
+      // A wedged worker would cost every later sentence as well, so it goes and a
+      // fresh one starts on the next question. But only when the thing that ran out
+      // of patience was the tidy-up: the judgement gives up after barely a second and
+      // queues behind whatever is already running, so its giving up says nothing about
+      // the worker's health and killing on it would take the tidy-up down repeatedly.
+      if (startAgainIfSlow) { try { worker?.kill(); } catch {} }
+      reject(new Error("too slow"));
+    }, patience);
+  });
+
+  worker.stdin.write(`${JSON.stringify({ id, ...payload })}\n`);
+  return answer;
+}
+
+/**
+ * Has the person stopped, or are they mid-thought? True for still talking, false for
+ * finished, and null for no opinion — which is most of the time, and is the answer
+ * that changes nothing.
+ *
+ * The whole question so far goes in, not the last breath, because that is the only
+ * thing that can tell a finished sentence in the middle of a list from a finished
+ * thought. Said out loud one at a time, "look at the tests" and "also the migrations"
+ * are both whole sentences and neither is the end of what he wanted.
+ *
+ * It is not asked to write an answer. Asked to write one, a model this small says
+ * "more" to everything, carried along by the shape of the examples rather than the
+ * meaning of the sentence. So it is asked which of the two allowed answers it leant
+ * towards and by how much, and only a lean far past the middle counts as an opinion.
+ */
+// Where the lines are drawn through the model's leaning, and they are nowhere near the
+// middle on purpose. Measured on real sentences from the drive log, this model is good
+// at recognising a finished thought and poor at recognising an unfinished one: plain
+// questions and instructions land near nought, while a list still being built lands
+// anywhere between a quarter and three quarters, mixed in with things that were
+// perfectly finished. So the middle band means nothing and is treated as no opinion.
+//
+// The lines are far apart because the two mistakes cost differently. Holding back a
+// finished question costs a beat and the send phrase. Waving through half a question
+// takes an action against something nobody finished saying.
+const SURELY_MORE = 0.9;
+const SURELY_DONE = 0.15;
+
+export function whatItMeant(leaning) {
+  if (typeof leaning !== "number" || !Number.isFinite(leaning)) return null;
+  if (leaning >= SURELY_MORE) return true;
+  if (leaning <= SURELY_DONE) return false;
+  return null;
+}
+
+export async function stillTalking(said) {
+  if (!isInstalled() || !said?.trim()) return null;
+  try {
+    await ensureRunning();
+    const { text } = await askTheModel(
+      { text: said, job: "still-talking" },
+      STILL_TALKING_PATIENCE_MS,
+      { startAgainIfSlow: false },
+    );
+    return whatItMeant(text);
+  } catch {
+    // Not installed, too slow, crashed. All of them mean the same thing here: decide
+    // it the way it was decided before any of this existed.
+    return null;
+  }
+}
+
 /**
  * What they actually said. Always returns something usable, whatever went wrong.
  *
@@ -276,21 +357,7 @@ export async function cleanUp(heard, { project } = {}) {
     await ensureRunning();
 
     const words = wordsFor(project ?? root);
-    const id = nextId++;
-    const answer = new Promise((resolve, reject) => {
-      waiting.set(id, { resolve, reject });
-      setTimeout(() => {
-        if (!waiting.has(id)) return;
-        waiting.delete(id);
-        // A wedged worker would cost every later sentence as well, so it goes and a
-        // fresh one starts on the next question.
-        try { worker?.kill(); } catch {}
-        reject(new Error("too slow"));
-      }, PATIENCE_MS);
-    });
-
-    worker.stdin.write(`${JSON.stringify({ id, text: heard, words })}\n`);
-    const { text, took } = await answer;
+    const { text, took } = await askTheModel({ text: heard, words }, PATIENCE_MS);
 
     const why = whyNotToTrust(heard, text, words);
     if (why) return { text: heard, changed: false, why, took };

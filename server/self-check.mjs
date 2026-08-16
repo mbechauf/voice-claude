@@ -8,7 +8,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { isInstalled as tidyUpInstalled, whyNotToTrust } from "./cleanup.mjs";
+import { isInstalled as tidyUpInstalled, whatItMeant, whyNotToTrust } from "./cleanup.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -319,6 +319,38 @@ function checkFinishedThoughts() {
     const got = finished(said);
     check(`finished: ${name}`, got === expected, got === expected ? "" : `said ${got}`);
   }
+
+  // The model's opinion on top of the words. Only one word means anything; a model
+  // that starts explaining itself has left the sheet behind and gets no vote.
+  const heard = [
+    ["sure he is still going", 0.97, true],
+    ["sure he has finished", 0.05, false],
+    ["barely leaning either way", 0.5, null],
+    ["leaning, but not enough to act on", 0.75, null],
+    ["leaning the other way, still not enough", 0.3, null],
+    ["no model there at all", null, null],
+    ["nonsense instead of a number", "MORE", null],
+  ];
+  for (const [name, leaning, expected] of heard) {
+    const got = whatItMeant(leaning);
+    check(`the pause, read as: ${name}`, got === expected, got === expected ? "" : `read as ${got}`);
+  }
+
+  // How long it waits, given the words and the model. The one that matters is the
+  // last: a finished-looking sentence that the model says is mid-thought must not be
+  // asked about on the short clock.
+  const waits = page.match(/function waitBefore[\s\S]*?\n  }/);
+  if (!waits) {
+    check("the page can be read for how long it waits", false);
+    return;
+  }
+  const waitBefore = new Function(`const setup = {}; ${waits[0]}; return waitBefore;`)();
+  check("a finished sentence is asked about quickly", waitBefore(true, null) === 1_500);
+  check("an unfinished one is left alone a long while", waitBefore(false, null) === 10_000);
+  check("the model can hold off a finished-sounding sentence",
+    waitBefore(true, true) === 10_000);
+  check("the model can bring forward an unfinished-looking one, but not all the way",
+    waitBefore(false, false) === 3_000);
 }
 
 function checkPickingAProject(names) {

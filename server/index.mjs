@@ -38,6 +38,7 @@ import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
   cleanUp,
   isInstalled as tidyUpInstalled,
+  stillTalking,
   warmUp as warmUpTidyUp,
 } from "./cleanup.mjs";
 
@@ -382,6 +383,18 @@ async function handle(req, res) {
     if (tidied.changed) note("tidied up a piece", `"${heard}" → "${tidied.text}"`);
     else if (tidied.why) note("kept a piece as heard", tidied.why);
     return send(res, 200, { text: tidied.text, changed: tidied.changed, why: tidied.why ?? "" });
+  }
+
+  // Asked at a pause: has he stopped, or is he mid-thought? The phone can already see
+  // whether the words end in a whole sentence; what it cannot see is a whole sentence
+  // that is the third item of a list still being built. This is the only thing here
+  // that reads the question so far rather than the piece just said.
+  if (url.pathname === "/still-talking" && req.method === "POST") {
+    const { said } = await readBody(req);
+    if (!said) return send(res, 400, { error: "nothing said" });
+    const more = await stillTalking(said);
+    if (more !== null) note("the pause", more ? "sounds like more is coming" : "sounds finished");
+    return send(res, 200, { more });
   }
 
   if (url.pathname === "/ask" && req.method === "POST") {
