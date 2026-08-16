@@ -8,6 +8,8 @@
     "start": "bash scripts/run.sh",
     "check": "node server/self-check.mjs",
     "voice:install": "bash scripts/install-voice.sh",
+    "cleanup:install": "bash scripts/install-cleanup.sh",
+    "cleanup:try": ".cleanup/bin/python server/cleanup/worker.py --try",
     "start:paid": "VOICE_CLAUDE_MODE=realtime bash scripts/run.sh",
     "subscription:check": "node server/subscription-cli.mjs --check",
     "claude:subscription": "node server/subscription-cli.mjs",

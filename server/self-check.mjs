@@ -8,6 +8,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { isInstalled as tidyUpInstalled, whyNotToTrust } from "./cleanup.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 const PORT = 8799; // not the real one, so this never fights a live session
@@ -215,6 +217,34 @@ function checkTheGate(livePhrases) {
 // The noises people make while thinking should never reach Claude, and taking them
 // out must not take any meaning with them. The two halves of that are tested
 // together: what comes out, and what must stay in.
+// The tidy-up rewrites what somebody said before Claude acts on it, and the only
+// thing standing between a small model having an off day and an instruction that
+// nobody gave is this. It is checked without the model, on purpose: the cases that
+// matter are the ones the model produces rarely, and waiting for one to happen is
+// not a test.
+function checkTheGuard() {
+  const words = ["Claude", "Claude Code", "trace log"];
+  const cases = [
+    ["ordinary tidying is trusted", "um can you check the tests", "Can you check the tests?", true],
+    ["a hesitation removed is trusted", "so like what does the gate do", "What does the gate do?", true],
+    ["a word repaired by sound is trusted", "look at the cloud code bridge", "Look at the Claude Code bridge.", true],
+    ["a word invented is refused", "the meeting is at two sorry three pm", "The meeting is at two and three pm.", false],
+    ["an instruction invented is refused", "have a look at the tests", "Have a look at the tests and delete the old ones.", false],
+    ["half the sentence lost is refused", "check the tests and then look at the login bug and the trace log", "Check the tests.", false],
+    ["a spoken word used twice over is refused", "no not yet is that a model he created", "No, not yet \u2014 that's not a model he created.", false],
+    ["answering instead of repairing is refused", "what does the gate do", "Sure! The gate decides what reaches Claude.", false],
+    ["nothing at all is refused", "what does the gate do", "", false],
+  ];
+
+  for (const [name, heard, repaired, shouldTrust] of cases) {
+    const why = whyNotToTrust(heard, repaired, words);
+    const trusted = why === "";
+    check(`the guard: ${name}`, trusted === shouldTrust, trusted ? "trusted" : why);
+  }
+
+  check("the tidy-up never stops a question", typeof tidyUpInstalled() === "boolean");
+}
+
 function checkFillerComesOut() {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
   const parts = [/const NOISES = [\s\S]*?\];/, /const STALLS = [\s\S]*?\n\];/, /function withoutFiller[\s\S]*?\n}/]
@@ -334,6 +364,51 @@ function checkPickingAProject(names) {
   }
 }
 
+// Remembering the conversation is only worth anything if it survives the app dying,
+// keeps the projects apart, and knows when it has nothing to offer. All three are
+// invisible from the driver's seat until the moment they are wrong.
+async function checkItRemembersPerProject() {
+  const scratch = path.join(root, ".voice-claude", "check-conversations.json");
+  process.env.VOICE_CLAUDE_MEMORY_FILE = scratch;
+  fs.rmSync(scratch, { force: true });
+
+  // Imported fresh each run so it reads the scratch file, not the real one.
+  const memory = await import(`./conversations.mjs?check=${results.length}`);
+  const { forget, gapPhrase, recall, remember } = memory;
+
+  try {
+    check("with nothing remembered, it starts clean", recall("/a") === null);
+
+    remember("/a", "aaa");
+    remember("/b", "bbb");
+    check("it hands back the same project's conversation", recall("/a")?.id === "aaa");
+    check("two projects never share a conversation", recall("/b")?.id === "bbb");
+
+    // The real test of it: the store is a file, so a fresh reader sees it too. That
+    // is exactly what happens when the app restarts.
+    const afterRestart = await import(`./conversations.mjs?restart=${results.length}`);
+    check("it survives the app restarting", afterRestart.recall("/a")?.id === "aaa");
+
+    forget("/a");
+    check("starting fresh clears the project you are on", recall("/a") === null);
+    check("starting fresh leaves the other projects alone", recall("/b")?.id === "bbb");
+
+    const now = new Date("2026-08-15T12:00:00Z");
+    check("a conversation from minutes ago is picked up silently",
+      gapPhrase(new Date("2026-08-15T11:30:00Z").toISOString(), now) === null);
+    check("a conversation from days ago says where it is picking up from",
+      Boolean(gapPhrase(new Date("2026-08-12T12:00:00Z").toISOString(), now)));
+
+    const { lostTheConversation } = await import("./claude-bridge.mjs");
+    check("it can tell a vanished conversation from a real failure",
+      lostTheConversation("Error: No conversation found with session ID abc") &&
+      !lostTheConversation("Error: you are out of credit"));
+  } finally {
+    fs.rmSync(scratch, { force: true });
+    delete process.env.VOICE_CLAUDE_MEMORY_FILE;
+  }
+}
+
 async function waitForServer() {
   for (let i = 0; i < 50; i += 1) {
     try {
@@ -450,10 +525,12 @@ try {
   );
 
   checkItKnowsItsOwnVoice();
+  checkTheGuard();
   checkFillerComesOut();
   checkFinishedThoughts();
   checkTheGate(setup.phrases);
   checkPickingAProject({ projectNames: setup.projectNames, giveaways: setup.giveaways });
+  await checkItRemembersPerProject();
 } finally {
   server.kill("SIGTERM");
 }

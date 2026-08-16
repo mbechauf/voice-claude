@@ -220,6 +220,22 @@ export const WHAT_EACH_DOES = {
   update: "load a newer version of this page, when one is waiting",
 };
 
+// ------------------------------------------------ words the phone has never met
+//
+// The tidy-up on the Mac can only put right a word it has heard of, and a phone's
+// dictation is trained on ordinary speech: the words below come back as whatever
+// everyday word sounds nearest, every single time. Handing the list over is what
+// lets "the cloud code bridge" become "the Claude Code bridge".
+//
+// Only the ones that are true wherever you are working belong here. The rest are
+// taken from the project itself, so a project nobody has thought about yet still
+// gets its own vocabulary without anyone adding a line.
+export const WORDS_WE_USE = [
+  "Claude", "Claude Code", "Anthropic", "GitHub", "npm", "git", "repo", "repository",
+  "commit", "branch", "pull request", "issue", "merge", "README", "dictation",
+  "trace log", "endpoint", "server", "browser", "Safari", "Mac", "iPhone",
+];
+
 // ------------------------------------------------- answering a question it asked
 //
 // Everything above is two or more words, because a single everyday word fires by

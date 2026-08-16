@@ -88,6 +88,7 @@ function log(text, cls = "") {
   div.textContent = text;
   logEl.append(div);
   scrollToNewest();
+  return div;
 }
 
 // Always show the newest line. Setting this straight after appending is right most
@@ -105,13 +106,14 @@ function scrollToNewest() {
 
 let results = null;
 let lastAnswer = "";
+let yourLastLine = null;   // the line showing what you just sent, so it can be repaired in place
 let wasRestarting = false;
 
-function ask(request) {
+function ask(request, { alreadyTidied = false } = {}) {
   return fetch("/ask", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ request }),
+    body: JSON.stringify({ request, alreadyTidied }),
   });
 }
 
@@ -210,6 +212,16 @@ function listenForResults(handle) {
   results.onmessage = (message) => {
     const { kind, text } = JSON.parse(message.data);
     if (kind === "final") lastAnswer = text;
+
+    // The Mac has repaired the sentence that was just sent. You never saw that
+    // happen — the screen still shows the raw dictation — so put the tidied words
+    // in its place. It is the same line, not a new one: seeing your question twice
+    // would be worse than not seeing the repair at all.
+    if (kind === "tidied") {
+      trace("TIDIED", text);
+      if (yourLastLine) yourLastLine.textContent = `you: ${text}`;
+      return;
+    }
 
     // It is about to disappear for a second and come back with new code. Say so,
     // because otherwise this looks exactly like the thing breaking.
@@ -931,9 +943,13 @@ const NOTES = {};
 function toneFor(which, shape) {
   if (NOTES[which]) return NOTES[which];
   const pieces = [];
+  // The two that repeat on a clock are shorter and softer than the ones that mark
+  // something happening, because anything you hear every ten seconds has to stay
+  // underneath the drive rather than on top of it.
+  const onAClock = which === "working" || which === "waiting";
   shape.forEach(([from, to], i) => {
     if (i) pieces.push(silenceFor(40));
-    pieces.push(blip(from, to, which === "working" ? 90 : 130, which === "working" ? 0.18 : 0.35));
+    pieces.push(blip(from, to, onAClock ? 90 : 130, onAClock ? 0.18 : 0.35));
   });
   const total = pieces.reduce((n, piece) => n + piece.length, 0);
   const all = new Uint8Array(total);
@@ -1024,6 +1040,14 @@ const sound = {
       // And the window has shut again. Deliberately the same two notes falling away,
       // so it is plainly the end of the thing the double note began.
       tooLate: [[880, 620]],
+      // You turned an offer down. Nothing is being asked of you and nothing has
+      // happened, so this is the quietest thing here: one low note falling away,
+      // below everything else, which is what "never mind, carry on" sounds like.
+      declined: [[380, 280]],
+      // Nothing recorded and nobody talking: a reminder that it is still listening.
+      // Flat, like the still-working note, because the two mean the same kind of
+      // thing — I am here — and only the pitch says which of them it is.
+      waiting: [[660, 660]],
     };
     const shape = shapes[which];
     if (!shape || !this.notes) return;
@@ -1095,14 +1119,61 @@ function splitFrontEnd() {
   // One running transcript of everything you have said since the last question went
   // off. It is always being written to, it is always on the screen, and nothing
   // removes anything from it except sending it. A pause is a person thinking.
+  //
+  // Each piece is kept twice over: exactly as heard, and tidied up. The two must not
+  // be confused. Everything that listens for a command, or checks whether it is
+  // hearing its own voice back, works on the words as heard — those decisions are
+  // made by sound, and handing them a rewrite would break them. The tidied version is
+  // only what goes on the screen and what finally goes to Claude. A piece whose
+  // tidy-up has not come back yet, or came back untrustworthy, simply shows and sends
+  // as heard, which is exactly what happened before any of this existed.
   const reader = makePhraseReader(setup.phrases);
-  let question = [];
+  let question = [];    // [{ heard, tidied }] — tidied is null until it comes back
+
+  const asHeard = (pieces = question) => pieces.map((p) => p.heard).join(" ");
+  const asTidied = (pieces = question) => pieces.map((p) => p.tidied ?? p.heard).join(" ");
 
   // Whatever the question was before the last thing that emptied it. A misheard
   // command is going to happen — no amount of matching makes that impossible — so
   // the answer is not to guess better but to make guessing wrong cost nothing.
   // Taking it back puts the words straight back.
   let lastEmptied = [];
+
+  // The tidy-ups still out at the Mac. Sending waits on these, but only for a moment:
+  // the point of tidying at every pause is that the wait is a fraction of one breath
+  // rather than the whole ramble, and a tidy-up that is late is not worth a pause in
+  // front of somebody who has just said "send it".
+  const tidying = new Set();
+  const WAIT_FOR_TIDYING_MS = 1_200;
+
+  // A piece goes on the screen the instant it is heard, and quietly improves a moment
+  // later if the Mac has something better. It is put back in its own place rather than
+  // on the end, because by the time it lands there may be more sentences after it.
+  function tidyUp(piece) {
+    const job = fetch("/tidy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ heard: piece.heard }),
+    })
+      .then((answer) => answer.json())
+      .then(({ text, changed }) => {
+        piece.tidied = String(text ?? piece.heard);
+        if (changed) trace("tidied", `${piece.heard} -> ${piece.tidied}`);
+      })
+      .catch(() => { piece.tidied = piece.heard; })   // never a reason to lose words
+      .finally(() => { tidying.delete(job); show(); });
+    tidying.add(job);
+  }
+
+  // The one way words get added to the question. Kept as heard, tidied in the
+  // background, on the screen either way. A bare "yes" needs no tidying and is on its
+  // way to Claude the instant it is said, so it skips the whole business.
+  function remember(heard, { tidy = true } = {}) {
+    const piece = { heard, tidied: tidy ? null : heard };
+    question.push(piece);
+    if (tidy) tidyUp(piece);
+    return piece;
+  }
   let toldAboutTheNewPage = false;
   let live = "";        // the words being said right this second, not settled yet
   let working = false;
@@ -1137,7 +1208,9 @@ function splitFrontEnd() {
     // finished still gets asked about eventually, because "and then the other thing"
     // left hanging for ten seconds is far more often someone who has stopped talking
     // than someone mid-thought — and the cost of asking is one word.
-    const finished = soundsFinished(question.join(" "));
+    // Judged on the words as heard, not the tidy-up. The tidy-up puts a full stop on
+    // the end of everything, and this is a test for a full stop.
+    const finished = soundsFinished(asHeard());
     const beat = finished ? (setup.offerAfter ?? 1_500) : (setup.offerAfterPause ?? 10_000);
     const offer = () => {
       offerTimer = null;
@@ -1146,18 +1219,18 @@ function splitFrontEnd() {
       // Talking underneath its own voice is the one thing that makes an offer worse
       // than useless, so it waits for quiet rather than cutting in.
       if (mouth?.busy) { offerTimer = setTimeout(offer, 500); return; }
-      trace("OFFERING TO SEND", question.join(" "));
+      trace("OFFERING TO SEND", asTidied());
       askYesNo("Send that?", send, () => {
         declined += 1;
         trace("offer declined", `${declined}`);
-        sound.note("listening");
+        sound.note("declined");
       });
     };
     offerTimer = setTimeout(offer, beat);
   }
 
   function show() {
-    const settled = [question.join(" "), reader.held()].filter(Boolean).join(" ");
+    const settled = [asTidied(), reader.held()].filter(Boolean).join(" ");
     promptEl.textContent = settled;
     if (live) {
       const tail = document.createElement("span");
@@ -1167,6 +1240,9 @@ function splitFrontEnd() {
     }
     promptEl.scrollTop = promptEl.scrollHeight;
     paint();
+    // The reminder is about silence, so its clock starts again from every change on
+    // the screen. Nothing changing is exactly the case it exists for.
+    waitingForYou();
   }
 
   function paint() {
@@ -1192,8 +1268,7 @@ function splitFrontEnd() {
     // If you named a project in the same breath, that has to land first.
     if (switching) { trace("waiting for the project to change"); await switching; }
 
-    const asked = question.join(" ").trim();
-    if (!asked) {
+    if (!question.length) {
       // Nothing to send means you wanted quiet: hush, and drop what is running.
       mouth?.silence();
       if (working) { stopWork(); working = false; stopTicking(); log("stopped", "work"); }
@@ -1202,24 +1277,41 @@ function splitFrontEnd() {
       return;
     }
 
+    // The last thing said is usually still being tidied, because it was said a second
+    // ago. Everything before it was done during the pauses. So this is a wait of a
+    // fraction of a sentence, and it gives up rather than hold anybody up.
+    if (tidying.size) {
+      trace("waiting on the tidy-up", `${tidying.size} still out`);
+      await Promise.race([
+        Promise.allSettled([...tidying]),
+        new Promise((done) => setTimeout(done, WAIT_FOR_TIDYING_MS)),
+      ]);
+    }
+
+    const asked = asTidied().trim();
+    if (!asked) { idleState(); return; }
+    // Every piece has been through the Mac already, so the whole thing must not be put
+    // through a second time — that second pass is the delay this was built to remove.
+    const alreadyTidied = question.every((p) => p.tidied !== null);
+
     sound.note("sent");
     trace("SENDING", asked);
     lastEmptied = question;
     question = [];
     live = "";
     show();
-    log(`you: ${asked}`, "you");
+    yourLastLine = log(`you: ${asked}`, "you");
 
     working = true;
     keepTicking();
     setState("thinking…");
-    ask(asked).catch((err) => log(String(err.message ?? err), "bad"));
+    ask(asked, { alreadyTidied }).catch((err) => log(String(err.message ?? err), "bad"));
   }
 
   function wipe() {
     stopOffering();
     declined = 0;
-    trace("WIPED", question.join(" "));
+    trace("WIPED", asHeard());
     lastEmptied = question;
     question = [];
     live = "";
@@ -1340,7 +1432,7 @@ function splitFrontEnd() {
   // joins anything already dictated rather than replacing it, so a yes said after a
   // half-built question adds to it instead of quietly throwing it away.
   function answerClaude(word) {
-    question.push(word);
+    remember(word, { tidy: false });
     show();
     send();
   }
@@ -1482,7 +1574,7 @@ function splitFrontEnd() {
     }
     mouth?.speak("Loading it. Tap the button once to get my voice back.");
     // Long enough to be heard, since the page is about to be replaced mid-sentence.
-    setTimeout(() => loadTheNewPage(question.join(" ")), 3_500);
+    setTimeout(() => loadTheNewPage(asTidied()), 3_500);
   }
 
   async function startAppAgain() {
@@ -1519,7 +1611,7 @@ function splitFrontEnd() {
     if (name === setup.project) {
       trace("ALREADY THERE", name);
       if (rest) {
-        question.push(rest);
+        remember(rest);
         trace("keeping", rest);
       } else {
         mouth?.speak(`Already on ${name}.`);
@@ -1552,7 +1644,7 @@ function splitFrontEnd() {
       // clearing. It is put back here rather than by the caller because the clearing
       // happens after the round trip, and would otherwise wipe it a moment later.
       if (rest) {
-        question.push(rest);
+        remember(rest);
         trace("keeping", rest);
       }
       show();
@@ -1599,10 +1691,30 @@ function splitFrontEnd() {
     tick = null;
   }
 
+  // The other silence: nothing recorded, nothing running, nobody talking. From the
+  // driver's seat that is indistinguishable from dictation having quietly died, and
+  // there is no way to check without looking. So it says so on the same clock the
+  // working note uses, a pitch above it, and stays out of the way of everything
+  // else — it never lands over its own voice, over a question it has asked, or
+  // while there are words on the screen waiting to be sent.
+  let waitingTick = null;
+  function waitingForYou() {
+    clearInterval(waitingTick);
+    waitingTick = setInterval(() => {
+      if (working || waitingOn || mouth?.busy) return;
+      if (question.length || live || reader.held()) return;
+      sound.note("waiting");
+    }, 10_000);
+  }
+  function stopWaitingNote() {
+    clearInterval(waitingTick);
+    waitingTick = null;
+  }
+
   // Says back what it has so far. Its own voice is filtered out of what it hears,
   // so reading the question aloud cannot end up recorded as part of the question.
   function readBack() {
-    const soFar = question.join(" ").trim();
+    const soFar = asTidied().trim();
     trace("READING BACK", soFar || "(nothing)");
     log(soFar ? `reading back: ${soFar}` : "nothing recorded yet", "work");
     mouth?.silence();
@@ -1618,12 +1730,12 @@ function splitFrontEnd() {
     if (!question.length && lastEmptied.length) {
       question = lastEmptied;
       lastEmptied = [];
-      trace("PUT BACK", question.join(" "));
-      log(`put back: ${question.join(" ")}`, "work");
+      trace("PUT BACK", asTidied());
+      log(`put back: ${asTidied()}`, "work");
       show();
       mouth?.silence();
       sound.note("listening");
-      mouth?.speak(`Put back. ${question.join(" ")}`);
+      mouth?.speak(`Put back. ${asTidied()}`);
       return;
     }
 
@@ -1633,13 +1745,14 @@ function splitFrontEnd() {
       return;
     }
     const dropped = question.pop();
-    trace("TOOK BACK", dropped);
-    log(`took back: ${dropped}`, "work");
+    const droppedText = dropped.tidied ?? dropped.heard;
+    trace("TOOK BACK", droppedText);
+    log(`took back: ${droppedText}`, "work");
     show();
     mouth?.silence();
     sound.note("wiped");
-    const left = question.join(" ").trim();
-    mouth?.speak(left ? `Taken out. It now ends. ${question[question.length - 1]}` : "Taken out. Nothing left.");
+    const last = question[question.length - 1];
+    mouth?.speak(last ? `Taken out. It now ends. ${last.tidied ?? last.heard}` : "Taken out. Nothing left.");
   }
 
   function heard(text) {
@@ -1691,12 +1804,12 @@ function splitFrontEnd() {
           switchTo(found.project, found.rest);
           continue;
         }
-        question.push(`${awaitingProject ?? ""} ${said}`.trim());
+        remember(`${awaitingProject ?? ""} ${said}`.trim());
         trace("not a project, so just words", said);
         continue;
       }
 
-      question.push(said);
+      remember(said);
       trace("keeping", said);
     }
 
@@ -1714,6 +1827,7 @@ function splitFrontEnd() {
     if (kind === "final") {
       working = false;
       stopTicking();
+      waitingForYou();   // the quiet after an answer is measured from the answer
       if (newPageWaiting && !toldAboutTheNewPage) {
         toldAboutTheNewPage = true;
         log("a newer page is ready — say \"load the new page\" when you can", "work");
@@ -1752,7 +1866,7 @@ function splitFrontEnd() {
       });
       if (!ears) throw new Error("This browser has no built-in dictation. Use Safari on the phone.");
 
-      questionInProgress = () => question.join(" ");
+      questionInProgress = () => asTidied();
       listenForResults(fromClaude);
       ears.start();
       goBtn.disabled = false;
@@ -1762,7 +1876,7 @@ function splitFrontEnd() {
         const kept = sessionStorage.getItem(KEPT);
         if (kept) {
           sessionStorage.removeItem(KEPT);
-          question = [kept];
+          question = [{ heard: kept, tidied: kept }];
           log(`carried over: ${kept}`, "work");
         }
       } catch {}
@@ -1783,6 +1897,7 @@ function splitFrontEnd() {
       results?.close(); results = null;
       stopWork();
       stopTicking();
+      stopWaitingNote();
       working = false;
       question = [];
       live = "";
