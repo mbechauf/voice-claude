@@ -4,6 +4,7 @@
 import { spawn } from "node:child_process";
 import { NEVER, ONLY_THESE, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
 import { forget, gapPhrase, recall, remember } from "./conversations.mjs";
+import { takeBackOver, whereItGotTo } from "./remote-control.mjs";
 
 /**
  * The plain-English name of a file, from its path. "the tidy-up worker" out of a
@@ -188,12 +189,27 @@ export function stopWork() {
 export function startWork(request, emit, { briefing = "", standing = "", project = STARTING_PROJECT } = {}) {
   if (current) stopWork();
 
-  const kept = recall(project);
+  let kept = recall(project);
+
+  // The turn may have been away on a screen since the last question here. If it was,
+  // and anything came of it, that is the conversation to carry on — not the one this
+  // app was in the middle of before it was handed over. Two threads from one past was
+  // the thing to avoid; this is where they are brought back to one.
+  const fromTheScreen = whereItGotTo(project);
+  if (fromTheScreen) {
+    kept = { id: fromTheScreen, at: new Date().toISOString() };
+    remember(project, fromTheScreen);
+    emit("progress", "picking up where you got to on the screen");
+  }
+  // Said either way, because the session on the screen has to go whether or not it
+  // was used: left open on the same past, the next thing typed into it forks the
+  // thread again, which is the whole complaint.
+  takeBackOver(project);
 
   // A conversation resumed after a long gap is about work that may since have landed.
   // Saying where we are picking up from is the difference between helpful and spooky,
   // and it costs one short sentence.
-  const gap = kept ? gapPhrase(kept.at) : null;
+  const gap = fromTheScreen ? null : (kept ? gapPhrase(kept.at) : null);
   if (gap) emit("progress", `picking up where we left off ${gap}`);
 
   launch({ request, emit, briefing, standing, project, resume: kept?.id ?? null, alreadyRetried: false });

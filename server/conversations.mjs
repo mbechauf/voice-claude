@@ -104,7 +104,38 @@ export function remember(project, id, now = new Date()) {
   // ago. The work streams back in dozens of pieces and each one used to rewrite the
   // whole store, which is a lot of chances to be caught mid-write for no gain.
   if (existing?.id === id && existing.at && now - new Date(existing.at) < STAMP_EVERY_MS) return;
-  all[project] = { id, at: now.toISOString() };
+  // A handover that is still outstanding is kept: it is about where the conversation
+  // went, not which one was last used here, and only picking it back up ends it.
+  all[project] = { id, at: now.toISOString(), ...(existing?.handover ? { handover: existing.handover } : {}) };
+  save(all);
+}
+
+/**
+ * Note that this project's conversation has been handed to a screen.
+ *
+ * Kept because the way back has to be found later, from a standing start, by an app
+ * that may well have restarted in between — and "which conversation did the screen
+ * carry on into" is not answerable without knowing that it went to one at all.
+ */
+export function handedOver(project, name, now = new Date()) {
+  const all = load();
+  if (!all) return;
+  const existing = all[project] ?? {};
+  all[project] = { ...existing, handover: { name, at: now.toISOString() } };
+  save(all);
+}
+
+/** The outstanding handover for this project, or null. */
+export function outstandingHandover(project) {
+  return load()?.[project]?.handover ?? null;
+}
+
+/** The turn is back here; the handover is over. */
+export function pickedBackUp(project) {
+  const all = load();
+  if (!all?.[project]?.handover) return;
+  const { handover, ...rest } = all[project];
+  all[project] = rest;
   save(all);
 }
 

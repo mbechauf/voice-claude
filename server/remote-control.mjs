@@ -18,7 +18,7 @@ import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 
 import { PROJECTS } from "./config.mjs";
-import { recall } from "./conversations.mjs";
+import { handedOver, outstandingHandover, pickedBackUp, recall } from "./conversations.mjs";
 
 // A detached terminal to live in. An interactive session needs one — run without it,
 // Claude Code has nothing to draw on and exits — and there is nobody at the keyboard
@@ -120,10 +120,71 @@ export function handOver(project) {
 
   if (known) answerTheSafetyQuestion(name);
 
+  handedOver(project, name);
+
   return {
     started: true,
     say: kept?.id
       ? "Done. This conversation is now in remote control, so you can pick it up on a screen."
       : "Done, but it starts on a blank page — there was no conversation saved for this project yet.",
   };
+}
+
+// Where Claude Code keeps what was said, one folder per project, one file per
+// conversation. Read rather than asked for, because there is nothing to ask: the
+// screen session is a separate process that reports to nobody here.
+const transcriptsFor = (project) =>
+  path.join(os.homedir(), ".claude", "projects", project.replace(/[/.]/g, "-"));
+
+/**
+ * Where the screen carried the conversation on to, if it did.
+ *
+ * The handover starts two threads from one past, and having two is exactly what was
+ * not wanted. So on the way back the newest thread this project has — as long as it
+ * was written after the handover, which is what makes it the screen's and not an old
+ * one lying about — becomes the thread the car carries on with.
+ *
+ * Returns null when nothing was handed over, or when the screen session was opened
+ * and never used. Then there is nothing to come back to and nothing changes.
+ */
+export function whereItGotTo(project) {
+  const handover = outstandingHandover(project);
+  if (!handover) return null;
+
+  const startedAt = new Date(handover.at).getTime();
+  let newest = null;
+  try {
+    for (const file of fs.readdirSync(transcriptsFor(project))) {
+      if (!file.endsWith(".jsonl")) continue;
+      const full = path.join(transcriptsFor(project), file);
+      const touched = fs.statSync(full).mtimeMs;
+      // A second of slack: the file is created as the session starts, which is the
+      // same moment by any clock a person would recognise.
+      if (touched < startedAt - 1_000) continue;
+      if (!newest || touched > newest.touched) newest = { id: file.replace(/\.jsonl$/, ""), touched };
+    }
+  } catch {
+    // No folder yet means nothing was said. Not a failure — just nothing to fetch.
+  }
+
+  return newest?.id ?? null;
+}
+
+/**
+ * The turn is back in the car. Close the session that was holding it, so there are
+ * not two of them, and forget the handover.
+ *
+ * Closing it is the point rather than tidiness: a screen session left open on the
+ * same past is the second conversation this was meant to avoid, and the next thing
+ * typed into it would fork the thread all over again.
+ */
+export function takeBackOver(project) {
+  const handover = outstandingHandover(project);
+  pickedBackUp(project);
+  if (!handover?.name) return;
+  try {
+    execFileSync(TERMINAL, ["-S", handover.name, "-X", "quit"]);
+  } catch {
+    // Already gone, which is the state we wanted it in anyway.
+  }
 }

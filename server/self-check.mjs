@@ -511,6 +511,23 @@ async function checkItRemembersPerProject() {
     check("a damaged store does not stop the new conversation being kept", recall("/c")?.id === "ccc");
     fs.rmSync(`${scratch}.unreadable`, { force: true });
 
+    // Handing the turn to a screen and taking it back. The whole point is that there
+    // is one conversation, so what matters is that the handover survives the app
+    // restarting, and that picking it back up ends it rather than leaving it standing.
+    const { handedOver, outstandingHandover, pickedBackUp } = memory;
+    remember("/d", "ddd");
+    check("nothing is handed over to begin with", outstandingHandover("/d") === null);
+    handedOver("/d", "a-session");
+    check("a handover is remembered", outstandingHandover("/d")?.name === "a-session");
+    const afterRestartAgain = await import(`./conversations.mjs?handover=${results.length}`);
+    check("a handover survives the app restarting",
+      afterRestartAgain.outstandingHandover("/d")?.name === "a-session");
+    remember("/d", "eee");
+    check("a handover outlives the conversation moving on", outstandingHandover("/d")?.name === "a-session");
+    pickedBackUp("/d");
+    check("picking it back up ends the handover", outstandingHandover("/d") === null);
+    check("and leaves the conversation alone", recall("/d")?.id === "eee");
+
     const now = new Date("2026-08-15T12:00:00Z");
     check("a conversation from minutes ago is picked up silently",
       gapPhrase(new Date("2026-08-15T11:30:00Z").toISOString(), now) === null);
