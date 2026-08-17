@@ -1507,6 +1507,7 @@ function splitFrontEnd() {
     if (command === "update") return takeTheNewPage();
     if (command === "project") { awaitingProject = spokenAs; return; }
     if (command === "help") return sayWhatYouCanSay();
+    if (command === "remote") return handToRemoteControl();
   }
 
   // --------------------------------------------- questions the phone itself asks
@@ -1833,6 +1834,23 @@ function splitFrontEnd() {
     } finally {
       landed();
       switching = null;
+    }
+  }
+
+  // The end of the drive, or the middle of it. Everything else here is for someone
+  // who cannot look at anything; this is the one thing that hands the work to
+  // somebody who can.
+  async function handToRemoteControl() {
+    trace("COMMAND", "remote control");
+    log("handing this over to remote control", "work");
+    try {
+      const answer = await fetch("/remote-control", { method: "POST" }).then((r) => r.json());
+      log(answer.say, answer.started ? "work" : "bad");
+      mouth?.speak(answer.say);
+    } catch (err) {
+      const trouble = `I couldn't reach the Mac to do that. ${err.message ?? err}`;
+      log(trouble, "bad");
+      mouth?.speak(trouble);
     }
   }
 

@@ -34,6 +34,7 @@ import {
 } from "./config.mjs";
 import { forgetConversation, isBusy, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
 import { recall } from "./conversations.mjs";
+import { handOver } from "./remote-control.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
   cleanUp,
@@ -407,6 +408,15 @@ async function handle(req, res) {
     const summary = await soFar(notes.join("\n"));
     if (summary) note("what has been going on", summary);
     return send(res, 200, { summary, steps: notes.length });
+  }
+
+  // Carry this on somewhere with a screen. Answered here rather than by Claude,
+  // because Claude is the thing being handed over.
+  if (url.pathname === "/remote-control" && req.method === "POST") {
+    const result = handOver(project);
+    note("remote control", result.say);
+    console.log(`  remote control: ${result.say}`);
+    return send(res, 200, result);
   }
 
   if (url.pathname === "/ask" && req.method === "POST") {

@@ -194,6 +194,11 @@ export const PHRASES = {
   // loading it costs the sound channel until you tap.
   update: ["load the new page", "take the new page", "update the page"],
 
+  // Hand this project's conversation to a Remote Control session, so it can be picked
+  // up on a screen. The whole wording is required rather than the bare two words: a
+  // conversation about remote control would otherwise perform one.
+  remote: ["put into remote control", "hand over to remote control", "put this into remote control"],
+
   // Say what all of these are. Answered by the phone itself, out of the list below —
   // it never goes to Claude, because the one moment you cannot remember a command is
   // the worst moment to wait a minute for an answer.
@@ -218,6 +223,7 @@ export const WHAT_EACH_DOES = {
   where: "say which project we are on",
   restart: "start the app again, to pick up code that just changed",
   update: "load a newer version of this page, when one is waiting",
+  remote: "hand this conversation to remote control, to carry on from a screen",
 };
 
 // ------------------------------------------------ words the phone has never met
