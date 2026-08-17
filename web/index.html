@@ -2024,7 +2024,7 @@ function splitFrontEnd() {
       if (endsWithAQuestion(text)) {
         trace("waiting", "the answer ended in a question");
         waitForAnswer(() => answerClaude("yes"), () => answerClaude("no"));
-      } else if (lastSaidSoFar || Date.now() - workStartedAt > (setup.handBackAfter ?? 15_000)) {
+      } else {
         // After a long wait, the end of the answer is hard to be sure of: it stops,
         // and nothing says whether that was the end or a pause before more. So it
         // hands back in as many words, and the tone lands after the handover rather
@@ -2035,8 +2035,16 @@ function splitFrontEnd() {
         // Any answer that had to say what it was up to along the way counts as a long
         // one whatever the clock says: being told three times that work is going on
         // and then hearing it stop is exactly the case that needs an ending.
+        //
+        // Timed from the question going out to the talking stopping, which is the only
+        // measure that matches what the person actually sat through. Timing the
+        // thinking alone was the mistake: ten seconds of thought followed by forty
+        // seconds of answer is a long wait by every measure except that one, and those
+        // were exactly the answers that ended in silence.
         whenQuiet.push(() => {
-          trace("handing back", "the answer took a while");
+          const wholeThing = Date.now() - workStartedAt;
+          if (!lastSaidSoFar && wholeThing < (setup.handBackAfter ?? 15_000)) return;
+          trace("handing back", `the whole thing took ${Math.round(wholeThing / 1000)}s`);
           mouth?.speak("Over to you.");
           whenQuiet.push(() => sound.note("ready"));
         });
