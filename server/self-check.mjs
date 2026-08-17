@@ -8,7 +8,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { isInstalled as tidyUpInstalled, whyNotToTrust } from "./cleanup.mjs";
+import { isInstalled as tidyUpInstalled, whatItMeant, whyNotToTrust } from "./cleanup.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -319,6 +319,66 @@ function checkFinishedThoughts() {
     const got = finished(said);
     check(`finished: ${name}`, got === expected, got === expected ? "" : `said ${got}`);
   }
+
+  // What it says during a long wait. Saying one step and dropping the other forty is
+  // the thing this replaced, so the counting is the part that has to be right.
+  const gathered = page.match(/const COUNTED = [\s\S]*?\n}/);
+  if (!gathered) {
+    check("the page can be read for what happened", false);
+  } else {
+    const whatHappened = new Function(`${gathered[0]}; return whatHappened;`)();
+    const gatherings = [
+      ["nothing yet", [], ""],
+      ["one step", ["reading cleanup"], "Read cleanup."],
+      ["two of a kind are named", ["reading cleanup", "reading conversations"],
+        "Read cleanup and conversations."],
+      ["a pile of them is counted", ["reading a", "reading b", "reading c", "reading d"],
+        "Read four files."],
+      ["the same step over and over is one step", ["reading a", "reading a", "reading a"], "Read a."],
+      ["different kinds are joined up", ["reading a", "changing b", "searching for resume"],
+        "Read a, changed b, then searched for resume."],
+      ["a sentence is kept whole and goes last",
+        ["reading a", "reading b", "Run the checks"], "Read a and b, then Run the checks."],
+      ["only the last couple of sentences survive",
+        ["one thing", "another thing", "a third thing"], "Another thing, then a third thing."],
+    ];
+    for (const [name, steps, expected] of gatherings) {
+      const got = whatHappened(steps);
+      check(`what happened: ${name}`, got === expected, got === expected ? "" : `said "${got}"`);
+    }
+  }
+
+  // The model's opinion on top of the words. Only one word means anything; a model
+  // that starts explaining itself has left the sheet behind and gets no vote.
+  const heard = [
+    ["sure he is still going", 0.97, true],
+    ["sure he has finished", 0.05, false],
+    ["barely leaning either way", 0.5, null],
+    ["leaning, but not enough to act on", 0.75, null],
+    ["leaning the other way, still not enough", 0.3, null],
+    ["no model there at all", null, null],
+    ["nonsense instead of a number", "MORE", null],
+  ];
+  for (const [name, leaning, expected] of heard) {
+    const got = whatItMeant(leaning);
+    check(`the pause, read as: ${name}`, got === expected, got === expected ? "" : `read as ${got}`);
+  }
+
+  // How long it waits, given the words and the model. The one that matters is the
+  // last: a finished-looking sentence that the model says is mid-thought must not be
+  // asked about on the short clock.
+  const waits = page.match(/function waitBefore[\s\S]*?\n  }/);
+  if (!waits) {
+    check("the page can be read for how long it waits", false);
+    return;
+  }
+  const waitBefore = new Function(`const setup = {}; ${waits[0]}; return waitBefore;`)();
+  check("a finished sentence is asked about quickly", waitBefore(true, null) === 1_500);
+  check("an unfinished one is left alone a long while", waitBefore(false, null) === 10_000);
+  check("the model can hold off a finished-sounding sentence",
+    waitBefore(true, true) === 10_000);
+  check("the model can bring forward an unfinished-looking one, but not all the way",
+    waitBefore(false, false) === 3_000);
 }
 
 function checkPickingAProject(names) {
@@ -456,6 +516,74 @@ async function checkItRemembersPerProject() {
       gapPhrase(new Date("2026-08-15T11:30:00Z").toISOString(), now) === null);
     check("a conversation from days ago says where it is picking up from",
       Boolean(gapPhrase(new Date("2026-08-12T12:00:00Z").toISOString(), now)));
+
+    // What is worth saying out loud while it works. The costly mistake is reading out
+    // half a written answer, or a path, at seventy miles an hour.
+    const { anUpdateWorthHearing } = await import("./claude-bridge.mjs");
+    const updates = [
+      ["a line about what it is off to do", "Let me look at how the sending works.", "Let me look at how the sending works."],
+      ["only the first sentence of it", "I'll check the tests. Then I will fix the bug.", "I'll check the tests."],
+      ["a file path is not for saying", "Let me open server/index.mjs and look.", ""],
+      ["code punctuation is not for saying", "The `send` function does it.", ""],
+      ["the answer being written is not an update", "There are six issues open and the first is about understanding a command by meaning rather than by how it sounded, which matters because", ""],
+      ["too short to mean anything", "Right.", ""],
+      ["a question mid-job is not an update", "Shall I merge it?", ""],
+      ["nothing at all", "", ""],
+    ];
+    for (const [name, said, expected] of updates) {
+      const got = anUpdateWorthHearing(said);
+      check(`saying where it is up to: ${name}`, got === expected, got === expected ? "" : `said "${got}"`);
+    }
+
+    // The account handed to the summary, with the written-down furniture taken out.
+    // Told a path, a small model reads the path out, so it is never shown one.
+    const { inPlainWords, worthSaying } = await import("./cleanup.mjs");
+    const plainly = [
+      ["a full path becomes a plain name", "Read /Users/x/server/conversations.mjs now", "Read conversations now"],
+      ["a short path too", "found in web/index.html", "found in index"],
+      ["line numbers go", "index:1214 and config:88", "index and config"],
+      ["a bare file name loses its kind", "changed cleanup.mjs", "changed cleanup"],
+      ["ordinary words are left alone", "the checks all passed", "the checks all passed"],
+    ];
+    for (const [name, before, expected] of plainly) {
+      const got = inPlainWords(before);
+      check(`plainly: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+    }
+
+    const summaries = [
+      ["a plain sentence", "The checks all passed and it is now changing the settings file",
+        "The checks all passed and it is now changing the settings file"],
+      ["quoted, because small models do that", '"It found four failures"', "It found four failures"],
+      ["symbols mean it went wrong", "It ran `npm run check` and it passed", ""],
+      ["a stub is not worth saying", "Working.", ""],
+      ["a document is not worth saying", new Array(70).fill("word").join(" "), ""],
+      ["nothing at all", "", ""],
+    ];
+    for (const [name, said, expected] of summaries) {
+      const got = worthSaying(said);
+      check(`worth saying: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
+    }
+
+    // Saying which file and what it searched for is the difference between knowing
+    // something is happening and knowing what is happening. But a path or a thicket of
+    // symbols read aloud is worse than the vague phrase it replaced.
+    const { describeTool } = await import("./claude-bridge.mjs");
+    const steps = [
+      ["the file being read", "Read", { file_path: "/a/b/conversations.mjs" }, "reading conversations"],
+      ["a file with a hyphen in it", "Read", { file_path: "/a/self-check.mjs" }, "reading self check"],
+      ["a file it cannot say", "Read", { file_path: "/a/x9$@.mjs" }, "reading the code"],
+      ["nothing to go on", "Read", {}, "reading the code"],
+      ["the file being changed", "Edit", { file_path: "/a/cleanup.mjs" }, "changing cleanup"],
+      ["a plain search", "Grep", { pattern: "resume" }, "searching for resume"],
+      ["a search full of symbols", "Grep", { pattern: "^\\s*(a|b)+$" }, "searching through the project"],
+      ["what a command is for", "Bash", { description: "Run the checks" }, "Run the checks"],
+      ["a command with nothing said about it", "Bash", {}, "running a command"],
+      ["something not known at all", "Sparkle", {}, "working"],
+    ];
+    for (const [name, tool, input, expected] of steps) {
+      const got = describeTool(tool, input);
+      check(`what it is doing: ${name}`, got === expected, got === expected ? "" : `said "${got}"`);
+    }
 
     const { lostTheConversation } = await import("./claude-bridge.mjs");
     check("it can tell a vanished conversation from a real failure",

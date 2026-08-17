@@ -32,12 +32,14 @@ import {
   VOICE_NAME,
   WHAT_EACH_DOES,
 } from "./config.mjs";
-import { forgetConversation, isBusy, startWork, stopWork } from "./claude-bridge.mjs";
+import { forgetConversation, isBusy, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
 import { recall } from "./conversations.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
   cleanUp,
   isInstalled as tidyUpInstalled,
+  soFar,
+  stillTalking,
   warmUp as warmUpTidyUp,
 } from "./cleanup.mjs";
 
@@ -382,6 +384,29 @@ async function handle(req, res) {
     if (tidied.changed) note("tidied up a piece", `"${heard}" → "${tidied.text}"`);
     else if (tidied.why) note("kept a piece as heard", tidied.why);
     return send(res, 200, { text: tidied.text, changed: tidied.changed, why: tidied.why ?? "" });
+  }
+
+  // Asked at a pause: has he stopped, or is he mid-thought? The phone can already see
+  // whether the words end in a whole sentence; what it cannot see is a whole sentence
+  // that is the third item of a list still being built. This is the only thing here
+  // that reads the question so far rather than the piece just said.
+  if (url.pathname === "/still-talking" && req.method === "POST") {
+    const { said } = await readBody(req);
+    if (!said) return send(res, 400, { error: "nothing said" });
+    const more = await stillTalking(said);
+    if (more !== null) note("the pause", more ? "sounds like more is coming" : "sounds finished");
+    return send(res, 200, { more });
+  }
+
+  // What has been going on, asked for while the answer is still being worked out. The
+  // account is emptied by the asking, so nothing is announced twice and each summary
+  // covers exactly the stretch since the last one.
+  if (url.pathname === "/so-far" && req.method === "POST") {
+    const notes = whatHasHappened();
+    if (!notes.length) return send(res, 200, { summary: "" });
+    const summary = await soFar(notes.join("\n"));
+    if (summary) note("what has been going on", summary);
+    return send(res, 200, { summary, steps: notes.length });
   }
 
   if (url.pathname === "/ask" && req.method === "POST") {

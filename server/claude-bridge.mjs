@@ -5,31 +5,134 @@ import { spawn } from "node:child_process";
 import { NEVER, ONLY_THESE, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
 import { forget, gapPhrase, recall, remember } from "./conversations.mjs";
 
-// Turns a tool name into something sayable. Deliberately vague about paths —
-// nobody driving wants to hear a directory listing.
-function describeTool(name) {
+/**
+ * The plain-English name of a file, from its path. "the tidy-up worker" out of a
+ * folder-and-extension mouthful, or nothing at all if it will not read aloud.
+ *
+ * A path said out loud is noise, but the name at the end of it is usually the most
+ * informative word available — the difference between "changing the code" and
+ * "changing the conversations file", which is the whole point of saying anything.
+ */
+function plainFileName(where) {
+  const last = String(where ?? "").split("/").pop() ?? "";
+  const withoutKind = last.replace(/\.[a-z0-9]+$/i, "");
+  const words = withoutKind.replace(/[-_.]+/g, " ").trim();
+  // Anything still carrying punctuation, or a bare letter, is not worth saying.
+  if (!words || words.length > 40 || /[^a-z0-9 ]/i.test(words)) return "";
+  return words;
+}
+
+/**
+ * What it is doing, said the way you would say it to someone in the passenger seat.
+ *
+ * The name of the step on its own — "reading the code", over and over — tells you
+ * only that something is happening, which is what the silence already told you. But
+ * every step arrives with its own details attached: which file, what it searched
+ * for, and for anything run at the command line a plain sentence describing the
+ * point of it. That is what gets said.
+ *
+ * Details are used only when they will read aloud cleanly. A path, a pattern full of
+ * punctuation, a name that is really a jumble of letters — those fall back to the
+ * vague phrase, because vague is better than gibberish at seventy miles an hour.
+ */
+export function describeTool(name, input = {}) {
+  const named = (verb, where, otherwise) => {
+    const what = plainFileName(where);
+    return what ? `${verb} ${what}` : otherwise;
+  };
+
   switch (name) {
     case "Read":
-      return "reading the code";
+      return named("reading", input.file_path, "reading the code");
     case "Edit":
     case "Write":
-      // Deliberately not the file name, and deliberately not what changed. Hearing
-      // the same path read out twenty times tells you nothing you did not know, and
-      // what it actually did belongs in the answer at the end.
-      return "changing the code";
-    case "Grep":
-    case "Glob":
+    case "NotebookEdit":
+      // The file, but never what changed: what it actually did belongs in the answer
+      // at the end, where it can be said properly rather than in fragments.
+      return named("changing", input.file_path, "changing the code");
+    case "Grep": {
+      const looking = String(input.pattern ?? "").trim();
+      // A search is only worth naming when it is a word rather than a thicket of
+      // symbols, which is most of the time and never when it is not.
+      if (looking && looking.length < 30 && /^[a-z0-9 _-]+$/i.test(looking)) {
+        return `searching for ${looking}`;
+      }
       return "searching through the project";
+    }
+    case "Glob":
+      return "looking for the right files";
     case "Bash":
-      return "checking the change history";
+      // Every command comes with a plain sentence saying what it is for, written for
+      // exactly this — so it is said instead of a guess about what the command does.
+      return String(input.description ?? "").trim() || "running a command";
     case "WebSearch":
+      return input.query ? `looking up ${String(input.query).slice(0, 60)}` : "looking something up";
     case "WebFetch":
-      return "looking something up";
+      return "reading something on the web";
     case "Task":
-      return "handing part of this to a helper";
+      return String(input.description ?? "").trim()
+        ? `handing over: ${String(input.description).trim()}`
+        : "handing part of this to a helper";
+    case "TodoWrite":
+      return "sorting out what to do next";
     default:
       return "working";
   }
+}
+
+// A running account of the job, kept for whoever asks next. Held to a sane length
+// because a driver is told about the last half minute, not the last half hour, and a
+// list that only grows would eventually be too big to summarise at all.
+const MOST_NOTES = 60;
+
+function noteDown(job, line) {
+  if (!job) return;
+  job.notes.push(line);
+  if (job.notes.length > MOST_NOTES) job.notes.splice(0, job.notes.length - MOST_NOTES);
+}
+
+/**
+ * Everything that has happened since the last time anybody asked, and emptied by the
+ * asking. Whoever is going to say it out loud takes it, so two askers cannot both be
+ * told the same thing and the same news cannot be announced twice.
+ */
+export function whatHasHappened() {
+  if (!current) return [];
+  const taken = current.notes;
+  current.notes = [];
+  return taken;
+}
+
+/**
+ * The one sentence of what Claude just said that is worth saying out loud mid-job,
+ * or nothing at all.
+ *
+ * What comes through here is a mix: a line about what it is off to do next, which is
+ * gold, and stretches of the answer itself being written out, which is not — the
+ * answer gets spoken properly when it is finished, and hearing half of it early is
+ * confusing rather than early.
+ *
+ * So: the first sentence only, and only when it is short. A long block is the answer
+ * being written, not a word about what is happening. Anything with the furniture of
+ * written work in it — a path, a bracket, a heading — is skipped rather than cleaned
+ * up, because at a pause it is better to say nothing than to read punctuation aloud.
+ */
+export function anUpdateWorthHearing(text) {
+  const whole = String(text ?? "").trim();
+  if (!whole) return "";
+  // Written-down things, not spoken ones. A driver gets nothing from any of them.
+  if (/[`{}<>[\]|#*]|\/\w|\.\w{2,4}\b/.test(whole)) return "";
+
+  const first = whole.split(/(?<=[.?!])\s+/)[0]?.trim() ?? "";
+  if (!first) return "";
+  const words = first.split(/\s+/).length;
+  // Under three words is not a sentence about anything. Over about twenty and it has
+  // stopped reporting and started explaining, which is what the answer is for.
+  if (words < 3 || words > 20) return "";
+  // A question mid-job would open the yes-or-no window against a thing that is still
+  // running, and the answer would land nowhere.
+  if (first.endsWith("?")) return "";
+  return first;
 }
 
 // Did it fail because the conversation we asked to continue is gone, or because
@@ -156,7 +259,7 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const job = { child, lastPhrase: null };
+  const job = { child, lastPhrase: null, notes: [] };
   current = job;
 
   const timer = setTimeout(() => {
@@ -188,13 +291,49 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
 
       if (event.type === "assistant" && event.message?.content) {
         for (const block of event.message.content) {
+          // Claude says what it is about to do before it does it — "let me look at how
+          // the sending works" — and that sentence is worth ten of "reading the code".
+          // It is the difference between knowing something is happening and knowing
+          // what is happening, which is the whole complaint about long silences.
+          if (block.type === "text") {
+            noteDown(job, `Said: ${String(block.text).trim().slice(0, 400)}`);
+            const said = anUpdateWorthHearing(block.text);
+            if (said && said !== job.lastPhrase) {
+              job.lastPhrase = said;
+              emit("progress", said);
+            }
+            continue;
+          }
           if (block.type === "tool_use") {
-            const phrase = describeTool(block.name);
+            noteDown(job, `Did: ${block.name} ${JSON.stringify(block.input ?? {}).slice(0, 300)}`);
+            const phrase = describeTool(block.name, block.input ?? {});
             if (phrase !== job.lastPhrase) {
               job.lastPhrase = phrase;
               emit("progress", phrase);
             }
           }
+        }
+      }
+
+      // What each step came back with. This is the part that was being thrown away
+      // wholesale, and it is where the substance is: what the search found, whether
+      // the checks passed, what the command printed. Kept short, because the whole
+      // point is to hand something readable to a summary rather than a transcript.
+      if (event.type === "user" && Array.isArray(event.message?.content)) {
+        for (const block of event.message.content) {
+          if (block.type !== "tool_result") continue;
+          const body = typeof block.content === "string"
+            ? block.content
+            : (Array.isArray(block.content) ? block.content.map((p) => p.text ?? "").join(" ") : "");
+          const trimmed = String(body).trim();
+          if (!trimmed) continue;
+          // The head and the tail: a command says what it is doing at the top and how
+          // it went at the bottom, and the middle is almost always the boring part.
+          const lines = trimmed.split("\n").filter((l) => l.trim());
+          const worth = lines.length > 6
+            ? [...lines.slice(0, 3), `… ${lines.length - 6} more lines …`, ...lines.slice(-3)]
+            : lines;
+          noteDown(job, `Got back: ${worth.join(" / ").slice(0, 500)}`);
         }
       }
 

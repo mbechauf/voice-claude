@@ -729,6 +729,68 @@ const CANNOT_END = new Set([
   "very", "more", "most", "just", "also", "not", "too", "quite", "really",
 ]);
 
+// Numbers said as words, because a summary is spoken and "3" read by a phone voice
+// lands differently from the rest of the sentence.
+const COUNTED = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+const inWords = (n) => COUNTED[n] ?? String(n);
+
+// The steps that come in floods and are worth counting rather than listing, and what
+// to call a pile of them. Everything else — a command's own description of itself, or
+// a line about what it is off to do next — is a sentence already and is kept whole.
+const FLOODS = [
+  { starts: "reading ", done: "read", pile: (n) => `read ${inWords(n)} files` },
+  { starts: "changing ", done: "changed", pile: (n) => `changed ${inWords(n)} files` },
+  { starts: "searching for ", done: "searched for", pile: (n) => `ran ${inWords(n)} searches` },
+];
+
+/**
+ * Everything that happened since the last time it spoke, in one sentence.
+ *
+ * Saying one step every half minute and dropping the other forty is how a long silence
+ * stays a long silence: what gets lost is not the headline but everything underneath
+ * it. So the steps are gathered up instead, the repetitive ones counted rather than
+ * listed, and the ones that were already a sentence kept as they were.
+ *
+ * The counting is what makes it sayable. Twenty file reads are one clause — "read
+ * eleven files" — and that clause carries more than any one of the twenty would.
+ */
+function whatHappened(steps) {
+  const seen = [];
+  for (const step of steps.map((s) => String(s ?? "").trim()).filter(Boolean)) {
+    if (seen[seen.length - 1] !== step) seen.push(step);
+  }
+  if (!seen.length) return "";
+
+  const piles = new Map();   // the counted kind, in the order they first turned up
+  const spoken = [];         // the kind that were already a sentence
+  for (const step of seen) {
+    const flood = FLOODS.find((f) => step.startsWith(f.starts));
+    if (!flood) { spoken.push(step); continue; }
+    const rest = step.slice(flood.starts.length);
+    const pile = piles.get(flood.starts) ?? { flood, things: [] };
+    if (!pile.things.includes(rest)) pile.things.push(rest);
+    piles.set(flood.starts, pile);
+  }
+
+  const parts = [];
+  for (const { flood, things } of piles.values()) {
+    // One or two of a thing are worth naming; a pile of them is worth counting. The
+    // names are the useful part right up until there are too many to hold on to.
+    if (things.length === 1) parts.push(`${flood.done} ${things[0]}`);
+    else if (things.length === 2) parts.push(`${flood.done} ${things[0]} and ${things[1]}`);
+    else parts.push(flood.pile(things.length));
+  }
+
+  // Whole sentences go last and only the most recent couple, because the newest is
+  // where it has got to and the older ones have been overtaken.
+  for (const said of spoken.slice(-2)) parts.push(said.replace(/\.$/, ""));
+
+  const joined = parts.length > 1
+    ? `${parts.slice(0, -1).join(", ")}, then ${parts[parts.length - 1]}`
+    : parts[0];
+  return `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`;
+}
+
 /**
  * Does this sound like a finished thought?
  *
@@ -1098,9 +1160,19 @@ const sound = {
 // ------------------------------------------------------------- the free front end
 
 function splitFrontEnd() {
+  // Things to do the moment it stops talking. There is no other way to know: the
+  // voice is queued sentence by sentence and a long answer takes as long as it takes,
+  // so anything that has to land after the last word has to wait to be called.
+  let whenQuiet = [];
   const talking = {
     onStart: () => paint(),
-    onFinish: () => { paint(); idleState(); },
+    onFinish: () => {
+      paint();
+      idleState();
+      const waiting = whenQuiet;
+      whenQuiet = [];
+      for (const then of waiting) then();
+    },
   };
 
   // The phone's own voice is either the choice or the safety net, depending on what
@@ -1175,6 +1247,50 @@ function splitFrontEnd() {
     return piece;
   }
   let toldAboutTheNewPage = false;
+  // Everything it has done since it last said anything. Emptied when it speaks, so
+  // what gets said is always the whole of the gap and never one step out of forty.
+  let sinceLastUpdate = [];
+  let lastSaidSoFar = "";      // the last summary spoken, so it is not said twice
+  let lastSaidSoFarAt = 0;
+  let workStartedAt = 0;       // when the question went, so a long wait can be known
+
+  // A long wait deserves a word, but a voice that narrates every step is worse than
+  // the silence it replaced. So it speaks on a clock rather than on events, and what
+  // it says covers everything that happened while it was quiet.
+  let askingSoFar = false;
+
+  async function sayWhereItIsUpTo() {
+    if (!working || askingSoFar) return;
+    if (mouth?.busy) return;                      // never talk over itself
+    const gap = setup.saySoFarEvery ?? 30_000;
+    if (Date.now() - lastSaidSoFarAt < gap) return;
+
+    // The counted-up version of the steps, which needs nothing and never fails. It is
+    // the floor, not the aim: what the Mac writes is better whenever it manages it.
+    const counted = whatHappened(sinceLastUpdate);
+    sinceLastUpdate = [];
+
+    // The Mac has the whole account — what each step came back with, not just its
+    // name — and a model there turns it into a sentence about what is going on. It is
+    // allowed to take a second or two, because this is said while waiting anyway.
+    askingSoFar = true;
+    let summary = "";
+    try {
+      const answer = await fetch("/so-far", { method: "POST" }).then((r) => (r.ok ? r.json() : null));
+      summary = String(answer?.summary ?? "").trim();
+    } catch {
+      // No answer is not a problem: the counted version below says something true.
+    }
+    askingSoFar = false;
+
+    const say = summary || counted;
+    if (!say || say === lastSaidSoFar) return;
+    if (!working || mouth?.busy) return;          // it finished, or started talking
+    lastSaidSoFar = say;
+    lastSaidSoFarAt = Date.now();
+    trace("saying where it is up to", summary ? say : `${say} (counted, no summary)`);
+    mouth?.speak(say);
+  }
   let live = "";        // the words being said right this second, not settled yet
   let working = false;
   let ears = null;
@@ -1194,6 +1310,37 @@ function splitFrontEnd() {
     if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
   }
 
+  // How long to wait before asking, given what the words look like and what the model
+  // made of the whole question so far. Three lengths rather than two, because there
+  // are three answers: it reads as finished, it reads as unfinished, and there is
+  // somebody still building a list out of finished-looking sentences.
+  //
+  // The model's no counts for more than its yes, on purpose. Asking too early takes an
+  // action against half a question; waiting too long costs a beat and the send phrase,
+  // which is what happens today anyway. So "more is coming" pushes the wait right out,
+  // while "sounds finished" only shortens a long wait — it never overrides the words.
+  function waitBefore(finished, more) {
+    const soon = setup.offerAfter ?? 1_500;
+    const eventually = setup.offerAfterPause ?? 10_000;
+    if (more === true) return eventually;
+    if (finished) return soon;
+    if (more === false) return setup.offerAfterThought ?? 3_000;
+    return eventually;
+  }
+
+  // Ask the Mac what it makes of the pause. Costs nothing when the model is not there:
+  // no answer means no opinion, and no opinion is exactly today's behaviour.
+  function askAboutThePause(said) {
+    return fetch("/still-talking", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ said }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => (typeof r?.more === "boolean" ? r.more : null))
+      .catch(() => null);
+  }
+
   function maybeOfferToSend() {
     stopOffering();
     // Twice told no is a person who wants to keep talking. Stop asking until this
@@ -1210,8 +1357,8 @@ function splitFrontEnd() {
     // than someone mid-thought — and the cost of asking is one word.
     // Judged on the words as heard, not the tidy-up. The tidy-up puts a full stop on
     // the end of everything, and this is a test for a full stop.
-    const finished = soundsFinished(asHeard());
-    const beat = finished ? (setup.offerAfter ?? 1_500) : (setup.offerAfterPause ?? 10_000);
+    const said = asHeard();
+    const finished = soundsFinished(said);
     const offer = () => {
       offerTimer = null;
       if (waitingOn || working || live || reader.held()) return;
@@ -1226,7 +1373,21 @@ function splitFrontEnd() {
         sound.note("declined");
       });
     };
-    offerTimer = setTimeout(offer, beat);
+
+    // The clock starts on the words alone, so nothing waits on the Mac to answer. The
+    // model's opinion arrives a fraction of a second later and moves the clock — which
+    // is only ever worth doing while this is still the same question and the offer has
+    // not already been made. Anything said in the meantime has cancelled all of it.
+    const startedAt = Date.now();
+    offerTimer = setTimeout(offer, waitBefore(finished, null));
+    askAboutThePause(said).then((more) => {
+      if (more === null || !offerTimer) return;
+      if (asHeard() !== said) return;
+      const left = waitBefore(finished, more) - (Date.now() - startedAt);
+      trace("the pause", more ? "he is mid-thought, holding off" : "sounds like a finished thought");
+      clearTimeout(offerTimer);
+      offerTimer = setTimeout(offer, Math.max(300, left));
+    });
   }
 
   function show() {
@@ -1303,8 +1464,19 @@ function splitFrontEnd() {
     yourLastLine = log(`you: ${asked}`, "you");
 
     working = true;
+    // A new question starts the clock over, so the first thing it does gets said
+    // promptly rather than being held back by an update from the last question.
+    sinceLastUpdate = [];
+    lastSaidSoFar = "";
+    lastSaidSoFarAt = Date.now();
+    workStartedAt = Date.now();
     keepTicking();
     setState("thinking…");
+    // The sound alone says "gone", and on a road with the windows down it is easy to
+    // half-hear or miss. A word says the same thing in a way that cannot be mistaken
+    // for a road noise, and it is one word so it is out of the way before the answer
+    // starts coming back.
+    mouth?.speak("Thinking");
     ask(asked, { alreadyTidied }).catch((err) => log(String(err.message ?? err), "bad"));
   }
 
@@ -1351,6 +1523,9 @@ function splitFrontEnd() {
   let waitingOn = null;      // { onYes, onNo } while a question of its own is open
   let waitTimer = null;
   let turnTimer = null;
+  // Whether they carried on talking instead of answering. Someone who has moved on
+  // does not need to be told, with a beep, that the thing they ignored has closed.
+  let saidSomethingSince = false;
 
   function stopWaiting() {
     if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
@@ -1364,18 +1539,15 @@ function splitFrontEnd() {
   // sounded when it opens but when it becomes usable — the moment the talking stops —
   // because a note played underneath its own voice is one more thing to talk over.
   function blipWhenItIsYourTurn() {
-    if (turnTimer) clearTimeout(turnTimer);
-    const check = () => {
-      turnTimer = null;
-      if (!waitingOn) return;                                   // answered, or given up on
-      if (mouth?.busy) { turnTimer = setTimeout(check, 250); return; }
-      sound.note("listening");
-    };
-    turnTimer = setTimeout(check, 250);
+    // Nothing. The window only ever opens behind a spoken question — "send that?", or
+    // a question at the end of an answer — and a question is already an invitation to
+    // answer it. A note on top of it said the same thing twice, and the second time
+    // was a beep in the ear of somebody who had just been asked something.
   }
 
   function waitForAnswer(onYes, onNo) {
     waitingOn = { onYes, onNo };
+    saidSomethingSince = false;
     if (waitTimer) clearTimeout(waitTimer);
     blipWhenItIsYourTurn();
     const window = setup.answerWindow ?? 25_000;
@@ -1399,9 +1571,12 @@ function splitFrontEnd() {
       const left = deadline - Date.now();
       if (left > 0) { waitTimer = setTimeout(closeUnlessStillTalking, Math.min(500, left)); return; }
       trace("stopped waiting", "no answer");
-      // Say so. Silence after a question is indistinguishable from a window still
-      // being open, and the cost of guessing wrong is saying "yes" into nothing.
-      sound.note("tooLate");
+      // Say so, but only into silence. Someone who has said nothing at all cannot tell
+      // an open window from a shut one, and the cost of guessing wrong is saying "yes"
+      // into nothing. Someone who has been talking has already moved on — and telling
+      // them the window shut, while they are mid-sentence, is the beep that made this
+      // worth changing.
+      if (!saidSomethingSince) sound.note("tooLate");
       stopWaiting();
     };
     waitTimer = setTimeout(closeUnlessStillTalking, 500);
@@ -1460,6 +1635,7 @@ function splitFrontEnd() {
     stopWaiting();
     if (saidExactly(text, setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
     if (saidExactly(text, setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
+    saidSomethingSince = true;
     trace("stopped waiting", `said something else: ${said}`);
     return false;   // not an answer — carry on and treat it as speech
   }
@@ -1684,6 +1860,9 @@ function splitFrontEnd() {
     stopTicking();
     tick = setInterval(() => {
       if (!mouth?.busy) sound.note("working");
+      // On the clock as well as on events, or a single slow step would swallow
+      // everything that led up to it and say none of it until the next thing happened.
+      sayWhereItIsUpTo();
     }, 10_000);
   }
   function stopTicking() {
@@ -1822,6 +2001,13 @@ function splitFrontEnd() {
     if (kind === "progress") {
       log(text, "work");
       setState(text);
+      // A long silence with a tick under it tells you something is happening and
+      // nothing about what. So the updates are spoken too — but sparingly, because a
+      // voice narrating every step is worse than the silence it replaced. One every
+      // twenty seconds or so, never on top of itself, and never the same words twice
+      // running.
+      sinceLastUpdate.push(text);
+      sayWhereItIsUpTo();
       return;
     }
     if (kind === "final") {
@@ -1838,6 +2024,22 @@ function splitFrontEnd() {
       if (endsWithAQuestion(text)) {
         trace("waiting", "the answer ended in a question");
         waitForAnswer(() => answerClaude("yes"), () => answerClaude("no"));
+      } else if (lastSaidSoFar || Date.now() - workStartedAt > (setup.handBackAfter ?? 15_000)) {
+        // After a long wait, the end of the answer is hard to be sure of: it stops,
+        // and nothing says whether that was the end or a pause before more. So it
+        // hands back in as many words, and the tone lands after the handover rather
+        // than before the answer — the same note, now meaning "your turn" instead of
+        // "here it comes". Not done on a quick answer, where nobody was in any doubt,
+        // and not done after a question, because the question is the handover.
+        //
+        // Any answer that had to say what it was up to along the way counts as a long
+        // one whatever the clock says: being told three times that work is going on
+        // and then hearing it stop is exactly the case that needs an ending.
+        whenQuiet.push(() => {
+          trace("handing back", "the answer took a while");
+          mouth?.speak("Over to you.");
+          whenQuiet.push(() => sound.note("ready"));
+        });
       }
       return;
     }
