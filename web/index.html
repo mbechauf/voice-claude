@@ -1160,9 +1160,19 @@ const sound = {
 // ------------------------------------------------------------- the free front end
 
 function splitFrontEnd() {
+  // Things to do the moment it stops talking. There is no other way to know: the
+  // voice is queued sentence by sentence and a long answer takes as long as it takes,
+  // so anything that has to land after the last word has to wait to be called.
+  let whenQuiet = [];
   const talking = {
     onStart: () => paint(),
-    onFinish: () => { paint(); idleState(); },
+    onFinish: () => {
+      paint();
+      idleState();
+      const waiting = whenQuiet;
+      whenQuiet = [];
+      for (const then of waiting) then();
+    },
   };
 
   // The phone's own voice is either the choice or the safety net, depending on what
@@ -1242,6 +1252,7 @@ function splitFrontEnd() {
   let sinceLastUpdate = [];
   let lastSaidSoFar = "";      // the last summary spoken, so it is not said twice
   let lastSaidSoFarAt = 0;
+  let workStartedAt = 0;       // when the question went, so a long wait can be known
 
   // A long wait deserves a word, but a voice that narrates every step is worse than
   // the silence it replaced. So it speaks on a clock rather than on events, and what
@@ -1458,6 +1469,7 @@ function splitFrontEnd() {
     sinceLastUpdate = [];
     lastSaidSoFar = "";
     lastSaidSoFarAt = Date.now();
+    workStartedAt = Date.now();
     keepTicking();
     setState("thinking…");
     // The sound alone says "gone", and on a road with the windows down it is easy to
@@ -1511,6 +1523,9 @@ function splitFrontEnd() {
   let waitingOn = null;      // { onYes, onNo } while a question of its own is open
   let waitTimer = null;
   let turnTimer = null;
+  // Whether they carried on talking instead of answering. Someone who has moved on
+  // does not need to be told, with a beep, that the thing they ignored has closed.
+  let saidSomethingSince = false;
 
   function stopWaiting() {
     if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
@@ -1524,18 +1539,15 @@ function splitFrontEnd() {
   // sounded when it opens but when it becomes usable — the moment the talking stops —
   // because a note played underneath its own voice is one more thing to talk over.
   function blipWhenItIsYourTurn() {
-    if (turnTimer) clearTimeout(turnTimer);
-    const check = () => {
-      turnTimer = null;
-      if (!waitingOn) return;                                   // answered, or given up on
-      if (mouth?.busy) { turnTimer = setTimeout(check, 250); return; }
-      sound.note("listening");
-    };
-    turnTimer = setTimeout(check, 250);
+    // Nothing. The window only ever opens behind a spoken question — "send that?", or
+    // a question at the end of an answer — and a question is already an invitation to
+    // answer it. A note on top of it said the same thing twice, and the second time
+    // was a beep in the ear of somebody who had just been asked something.
   }
 
   function waitForAnswer(onYes, onNo) {
     waitingOn = { onYes, onNo };
+    saidSomethingSince = false;
     if (waitTimer) clearTimeout(waitTimer);
     blipWhenItIsYourTurn();
     const window = setup.answerWindow ?? 25_000;
@@ -1559,9 +1571,12 @@ function splitFrontEnd() {
       const left = deadline - Date.now();
       if (left > 0) { waitTimer = setTimeout(closeUnlessStillTalking, Math.min(500, left)); return; }
       trace("stopped waiting", "no answer");
-      // Say so. Silence after a question is indistinguishable from a window still
-      // being open, and the cost of guessing wrong is saying "yes" into nothing.
-      sound.note("tooLate");
+      // Say so, but only into silence. Someone who has said nothing at all cannot tell
+      // an open window from a shut one, and the cost of guessing wrong is saying "yes"
+      // into nothing. Someone who has been talking has already moved on — and telling
+      // them the window shut, while they are mid-sentence, is the beep that made this
+      // worth changing.
+      if (!saidSomethingSince) sound.note("tooLate");
       stopWaiting();
     };
     waitTimer = setTimeout(closeUnlessStillTalking, 500);
@@ -1620,6 +1635,7 @@ function splitFrontEnd() {
     stopWaiting();
     if (saidExactly(text, setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
     if (saidExactly(text, setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
+    saidSomethingSince = true;
     trace("stopped waiting", `said something else: ${said}`);
     return false;   // not an answer — carry on and treat it as speech
   }
@@ -2008,6 +2024,22 @@ function splitFrontEnd() {
       if (endsWithAQuestion(text)) {
         trace("waiting", "the answer ended in a question");
         waitForAnswer(() => answerClaude("yes"), () => answerClaude("no"));
+      } else if (lastSaidSoFar || Date.now() - workStartedAt > (setup.handBackAfter ?? 15_000)) {
+        // After a long wait, the end of the answer is hard to be sure of: it stops,
+        // and nothing says whether that was the end or a pause before more. So it
+        // hands back in as many words, and the tone lands after the handover rather
+        // than before the answer — the same note, now meaning "your turn" instead of
+        // "here it comes". Not done on a quick answer, where nobody was in any doubt,
+        // and not done after a question, because the question is the handover.
+        //
+        // Any answer that had to say what it was up to along the way counts as a long
+        // one whatever the clock says: being told three times that work is going on
+        // and then hearing it stop is exactly the case that needs an ending.
+        whenQuiet.push(() => {
+          trace("handing back", "the answer took a while");
+          mouth?.speak("Over to you.");
+          whenQuiet.push(() => sound.note("ready"));
+        });
       }
       return;
     }
