@@ -57,6 +57,38 @@ the conversation by reading what Claude Code writes down as it happens, and a ty
 question goes into that same conversation — so the answer arrives the same way
 everything else does.
 
+## What holds us to it (issue #24)
+
+The rule above is one line of the driving page: a frame marked as typed is dropped
+before anything can be said about it. Everything else here — the silence, the absent
+"Thinking", the absent tone — follows from that one line being in the right place.
+
+For a while the only thing guarding it was a search for its own text, which is barely a
+guard at all. It caught the line being deleted or turned around, and missed the two ways
+it would actually go wrong: being moved down the function so that it fires after the
+answer has already been remembered, or after the driver's own line has been rewritten
+with somebody else's typing. Both leave the text sitting there, findable, doing nothing.
+
+So the page's ear is now lifted out and fed real frames — typed and spoken — and both
+directions are checked. The refusals matter, but so do the successes: a check that only
+proved silence would pass just as happily if the page had gone deaf altogether. All four
+ways of breaking the rule were tried against it before it was trusted, and each one
+fails at least one check.
+
+## The one place the rule still leaks
+
+If a typed question is still being answered and a question is then spoken about the same
+project, the two share one reply stream and get muddled. Pieces of the typed answer can
+come back labelled as spoken and be read out loud, and the typing screen waits forever
+because nothing tells it that its question was abandoned.
+
+That is not a separate fault to patch here. The word saying where a question came from
+is attached to what goes out, but it never travels with the work itself — so at the
+moment the two collide there is nothing left to tell them apart. Fixing it means a
+question carrying its origin the whole way through, which is issue #21. Until that
+lands, this rule is kept by filtering at the last moment rather than by the two answers
+never being confusable in the first place.
+
 ## Where it lives
 
 The box is at the bottom of the watching page, `web/watching.html`. Both ways of asking
