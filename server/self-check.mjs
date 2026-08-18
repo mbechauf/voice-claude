@@ -612,6 +612,160 @@ async function checkItRemembersPerProject() {
   }
 }
 
+// A screen reading everything that happened, while the car hears its one sentence.
+// The whole design rests on the record being something nobody can take from anybody
+// else, so what is exercised here is mostly that: two readers, a reader that comes
+// back later, a conversation replaced underneath one, and a line caught half-written.
+async function checkAScreenCanWatch() {
+  const scratch = path.join(root, ".voice-claude", "check-watching.json");
+  const kept = path.join(root, ".voice-claude", "check-transcripts");
+  const project = "/tmp/a-project";
+  const folder = path.join(kept, project.replace(/[^a-zA-Z0-9]/g, "-"));
+
+  process.env.VOICE_CLAUDE_MEMORY_FILE = scratch;
+  process.env.VOICE_CLAUDE_TRANSCRIPTS = kept;
+  fs.rmSync(scratch, { force: true });
+  fs.rmSync(kept, { recursive: true, force: true });
+  fs.mkdirSync(folder, { recursive: true });
+
+  const watching = await import(`./watching.mjs?check=${results.length}`);
+  const { remember } = await import(`./conversations.mjs?watching=${results.length}`);
+
+  const file = (id) => path.join(folder, `${id}.jsonl`);
+  const said = (text) =>
+    `${JSON.stringify({ type: "assistant", timestamp: "2026-01-01T00:00:00Z", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
+  const step = (name, why) =>
+    `${JSON.stringify({ type: "assistant", timestamp: "2026-01-01T00:00:00Z", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name, input: { description: why } }] } })}\n`;
+  const came = (text) =>
+    `${JSON.stringify({ type: "user", timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: text }] } })}\n`;
+
+  try {
+    check("with nothing said yet, a screen is told so rather than shown nothing",
+      watching.since(project).happenings.length === 0 && Boolean(watching.since(project).waiting));
+
+    remember(project, "one");
+    fs.writeFileSync(file("one"), said("hello") + step("Bash", "look at the tests") + came("all fine"));
+
+    const first = watching.since(project);
+    check("a screen sees everything that happened", first.happenings.length === 3,
+      `${first.happenings.length} things`);
+    check("it sees what was said", first.happenings[0].kind === "said" && first.happenings[0].text === "hello");
+    check("it sees each step and what it was for",
+      first.happenings[1].kind === "step" && first.happenings[1].why === "look at the tests");
+    check("it sees what came back", first.happenings[2].kind === "result" && first.happenings[2].text === "all fine");
+
+    check("looking again shows nothing twice", watching.since(project, first.place).happenings.length === 0);
+
+    // The point of the whole thing: one screen reading changes nothing for anybody
+    // else. The account the car reads empties as it is read, which is exactly why a
+    // second viewer could not be pointed at it.
+    const second = watching.since(project);
+    check("a second screen sees the same, whole", second.happenings.length === 3);
+    check("and the first screen is unaffected", watching.since(project, first.place).happenings.length === 0);
+
+    fs.appendFileSync(file("one"), said("more"));
+    const later = watching.since(project, first.place);
+    check("it is handed only what is new", later.happenings.length === 1 && later.happenings[0].text === "more");
+
+    // The file is being written to while it is read, so the last line is regularly a
+    // fragment. Treating one as an entry would put something on the screen that was
+    // never true.
+    fs.appendFileSync(file("one"), '{"type": "assistant", "message": {"role": "assist');
+    const mid = watching.since(project, later.place);
+    check("a half-written line is never shown", mid.happenings.length === 0);
+    fs.appendFileSync(file("one"), 'ant", "content": [{"type": "text", "text": "finished"}]}}\n');
+    const done = watching.since(project, mid.place);
+    check("and appears the moment it is complete",
+      done.happenings.length === 1 && done.happenings[0].text === "finished");
+
+    // A screen that carried on counting into a different conversation would show
+    // nonsense with total confidence, so it starts again and says why.
+    remember(project, "two");
+    fs.writeFileSync(file("two"), said("a fresh start"));
+    const moved = watching.since(project, done.place);
+    check("a new conversation is shown from the beginning", moved.happenings.length === 1);
+    check("and the screen is told that is what happened", moved.startedAgain === true && Boolean(moved.note));
+
+    // Falling behind what is left has to be said out loud. Handing back whatever is
+    // there now is how a viewer ends up quietly lying about what it has seen.
+    fs.writeFileSync(file("two"), said("rewritten"));
+    const rewound = watching.since(project, watching.placeOf("two", 99_999));
+    check("a place that no longer exists is admitted, not papered over",
+      rewound.startedAgain === true && Boolean(rewound.note));
+
+    fs.writeFileSync(file("two"), came("x".repeat(9_000)));
+    const big = watching.since(project);
+    check("a huge result is bounded but says how much was left out",
+      big.happenings[0].dropped > 0 && big.happenings[0].text.length < 9_000,
+      `${big.happenings[0].dropped} left out`);
+
+    // The record is Claude Code's own file, which nothing here writes to — so a
+    // screen keeps working across the app restarting, which happens constantly.
+    const afterRestart = await import(`./watching.mjs?restart=${results.length}`);
+    check("a screen carries on after the app restarts",
+      afterRestart.since(project).happenings.length === 1);
+  } finally {
+    fs.rmSync(scratch, { force: true });
+    fs.rmSync(kept, { recursive: true, force: true });
+    delete process.env.VOICE_CLAUDE_MEMORY_FILE;
+    delete process.env.VOICE_CLAUDE_TRANSCRIPTS;
+  }
+}
+
+// The drawing half of the screen. Lifted out of the page and run here against a
+// pretend document, for the same reason the voice check is: a thing only ever
+// exercised by looking at it is a thing nobody notices has broken.
+function checkTheScreenCanDrawIt() {
+  const page = fs.readFileSync(path.join(root, "web", "watching.html"), "utf8");
+  const pieces = ["line", "label", "body", "readable"].map((name) =>
+    page.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n      }`)),
+  );
+  const clock = page.match(/const at = \([\s\S]*?;\n/);
+  if (pieces.some((piece) => !piece) || !clock) {
+    check("the screen's drawing can be found in the page", false, "couldn't find those parts");
+    return;
+  }
+
+  const made = [];
+  const document = {
+    createElement: (tag) => {
+      const el = {
+        tag,
+        className: "",
+        textContent: "",
+        children: [],
+        append(...kids) { this.children.push(...kids); },
+      };
+      made.push(el);
+      return el;
+    },
+  };
+  const draw = new Function(
+    "document",
+    `${clock[0]}${pieces.map((p) => p[0]).join("\n")}; return line;`,
+  )(document);
+
+  const text = (el) => [el.textContent, ...el.children.map(text)].join(" ");
+
+  const said = draw({ kind: "said", when: "2026-01-01T09:00:00Z", text: "here is the answer" });
+  check("the screen shows what was said", text(said).includes("here is the answer"));
+
+  const step = draw({ kind: "step", name: "Bash", why: "run the checks", detail: { command: "npm run check" } });
+  check("the screen shows a step and what it was for", text(step).includes("run the checks"));
+  // What you would have typed, rather than a record of what you would have typed.
+  check("the screen shows the command itself", text(step).includes("npm run check"));
+
+  const result = draw({ kind: "result", text: "all fine", dropped: 1_234 });
+  check("the screen shows what came back", text(result).includes("all fine"));
+  check("and says how much of it was left out", text(result).includes("1,234"));
+
+  const briefing = draw({ kind: "asked", text: "the standing briefing", background: true });
+  // Folded away, never dropped: a screen showing less than what happened is worse
+  // than one showing it dully.
+  check("background is folded rather than hidden",
+    briefing.children.some((kid) => kid.tag === "details") && text(briefing).includes("the standing briefing"));
+}
+
 async function waitForServer() {
   for (let i = 0; i < 50; i += 1) {
     try {
@@ -735,6 +889,14 @@ try {
   checkPickingAProject({ projectNames: setup.projectNames, giveaways: setup.giveaways });
   await checkItSaysWhereWeAre();
   await checkItRemembersPerProject();
+  await checkAScreenCanWatch();
+  checkTheScreenCanDrawIt();
+
+  const watchingPage = await (await fetch(`${base}/watching`)).text();
+  check("serves the page a screen watches from", watchingPage.includes("/watching/since"));
+  const watchingFeed = await (await fetch(`${base}/watching/since`)).json();
+  check("tells a screen which projects there are", Array.isArray(watchingFeed.projects));
+  check("tells a screen where the car is", Boolean(watchingFeed.driving));
 } finally {
   server.kill("SIGTERM");
 }
