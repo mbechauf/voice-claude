@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { NEVER, ONLY_THESE, STARTING_PROJECT, WORK_TIMEOUT_MS } from "./config.mjs";
 import { forget, gapPhrase, recall, remember } from "./conversations.mjs";
 import { takeBackOver, whereItGotTo } from "./remote-control.mjs";
+import * as openSessions from "./session-holder.mjs";
 
 /**
  * The plain-English name of a file, from its path. "the tidy-up worker" out of a
@@ -86,6 +87,18 @@ export function describeTool(name, input = {}) {
 // list that only grows would eventually be too big to summarise at all.
 const MOST_NOTES = 60;
 
+// The head and the tail of what a step came back with: a command says what it is
+// doing at the top and how it went at the bottom, and the middle is almost always the
+// boring part. Shared, because both roads to Claude write the same record.
+export function trimmedResult(body) {
+  const lines = String(body ?? "").trim().split("\n").filter((l) => l.trim());
+  if (!lines.length) return "";
+  const worth = lines.length > 6
+    ? [...lines.slice(0, 3), `… ${lines.length - 6} more lines …`, ...lines.slice(-3)]
+    : lines;
+  return worth.join(" / ").slice(0, 500);
+}
+
 function noteDown(job, line) {
   if (!job) return;
   job.notes.push(line);
@@ -166,11 +179,20 @@ export function isBusy() {
 /** Start over on purpose. This project only; the others keep what they had. */
 export function forgetConversation(project = STARTING_PROJECT) {
   forget(project);
+  // The open session is holding the old conversation in memory, and would go on
+  // holding it after being told to forget. Letting go there too is what makes a fresh
+  // start actually fresh.
+  openSessions.forget(project).catch(() => {});
 }
 
 export function stopWork() {
   if (!current) return false;
-  current.child.kill("SIGTERM");
+  // Two roads, two ways to stop. The old one is a process of its own and killing it
+  // is the whole of it. The open session is a conversation we mean to keep, so
+  // stopping means letting go of this answer rather than taking the session down with
+  // it — killing that would cost the drive to save a sentence.
+  if (current.open) current.open.stopped = true;
+  else current.child.kill("SIGTERM");
   current = null;
   return true;
 }
@@ -212,7 +234,81 @@ export function startWork(request, emit, { briefing = "", standing = "", project
   const gap = fromTheScreen ? null : (kept ? gapPhrase(kept.at) : null);
   if (gap) emit("progress", `picking up where we left off ${gap}`);
 
-  launch({ request, emit, briefing, standing, project, resume: kept?.id ?? null, alreadyRetried: false });
+  const opening = openingFor({ request, briefing, standing, resume: kept?.id ?? null });
+
+  // The open session first, and the old way if it will not have it. Everything about
+  // the old way stays exactly where it was: this is a faster road to the same place,
+  // not a replacement, and a road that is out has to put you back on the old one
+  // rather than leave you standing.
+  askTheOpenSession({ project, opening, resume: kept?.id ?? null, emit })
+    .then((handled) => {
+      if (handled) return;
+      launch({ request, emit, briefing, standing, project, resume: kept?.id ?? null, alreadyRetried: false });
+    });
+}
+
+/**
+ * Put the question to the conversation that is already open, if there is one to put
+ * it to. Resolves true when it was answered there, false when the caller should go
+ * the old way — never rejects, because a failure here is not the driver's problem.
+ */
+async function askTheOpenSession({ project, opening, resume, emit }) {
+  if (!openSessions.isInstalled() || process.env.VOICE_CLAUDE_OPEN_SESSION === "off") return false;
+
+  const job = { stopped: false };
+  current = { child: null, lastPhrase: null, notes: [], open: job };
+
+  try {
+    if (!(await openSessions.startIfNeeded())) return giveUp(job);
+
+    let finalText = "";
+    await openSessions.ask({ project, ask: opening, resume }, (message) => {
+      if (job.stopped) return;
+      const job_ = current;
+
+      if (message.kind === "conversation") {
+        remember(project, message.id);
+      } else if (message.kind === "said") {
+        noteDown(job_, `Said: ${String(message.text).trim().slice(0, 400)}`);
+        const said = anUpdateWorthHearing(message.text);
+        if (said && said !== job_.lastPhrase) {
+          job_.lastPhrase = said;
+          emit("progress", said);
+        }
+      } else if (message.kind === "step") {
+        noteDown(job_, `Did: ${message.name} ${JSON.stringify(message.input ?? {}).slice(0, 300)}`);
+        const phrase = describeTool(message.name, message.input ?? {});
+        if (phrase !== job_.lastPhrase) {
+          job_.lastPhrase = phrase;
+          emit("progress", phrase);
+        }
+      } else if (message.kind === "result") {
+        noteDown(job_, `Got back: ${trimmedResult(message.text)}`);
+      } else if (message.kind === "done") {
+        finalText = message.text ?? finalText;
+      }
+    });
+
+    if (job.stopped) return true;                 // stopped on purpose; nothing to say
+    current = null;
+    if (!finalText.trim()) {
+      emit("error", "It finished but didn't come back with anything.");
+      return true;
+    }
+    emit("final", finalText.trim());
+    return true;
+  } catch (err) {
+    if (job.stopped) return true;
+    console.error(`open session: ${err.message}`);
+    return giveUp(job);
+  }
+}
+
+// Hand the question back to the old way, and leave nothing of this attempt behind.
+function giveUp(job) {
+  if (job.stopped) return true;
+  current = null;
+  return false;
 }
 
 // One attempt. Split out from the above because a stored conversation can turn out to
@@ -341,15 +437,7 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
           const body = typeof block.content === "string"
             ? block.content
             : (Array.isArray(block.content) ? block.content.map((p) => p.text ?? "").join(" ") : "");
-          const trimmed = String(body).trim();
-          if (!trimmed) continue;
-          // The head and the tail: a command says what it is doing at the top and how
-          // it went at the bottom, and the middle is almost always the boring part.
-          const lines = trimmed.split("\n").filter((l) => l.trim());
-          const worth = lines.length > 6
-            ? [...lines.slice(0, 3), `… ${lines.length - 6} more lines …`, ...lines.slice(-3)]
-            : lines;
-          noteDown(job, `Got back: ${worth.join(" / ").slice(0, 500)}`);
+          noteDown(job, `Got back: ${trimmedResult(body)}`);
         }
       }
 
