@@ -602,6 +602,28 @@ async function checkItRemembersPerProject() {
       check(`what it is doing: ${name}`, got === expected, got === expected ? "" : `said "${got}"`);
     }
 
+    // What a step came back with, cut down for the record. Both roads to Claude write
+    // this, so it has to mean the same thing on each.
+    const { trimmedResult } = await import("./claude-bridge.mjs");
+    check("a short result is kept whole", trimmedResult("one\ntwo") === "one / two");
+    check("nothing came back is nothing", trimmedResult("") === "");
+    const long = trimmedResult(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"));
+    check("a long result keeps its head and tail", long.startsWith("line 0") && long.endsWith("line 39"));
+    check("and says how much it dropped", long.includes("34 more lines"));
+
+    // The open session has to fail towards the old way rather than leave somebody in
+    // silence. With nothing listening, asking must give up rather than hang.
+    const holder = await import("./session-holder.mjs");
+    const nothingThere = await holder.isRunning();
+    check("it can tell whether a session is open", typeof nothingThere === "boolean");
+    let gaveUp = false;
+    try {
+      await holder.ask({ project: root, ask: "hello" }, () => {});
+    } catch {
+      gaveUp = true;
+    }
+    check("with no session open, asking gives up rather than hanging", gaveUp || nothingThere);
+
     const { lostTheConversation } = await import("./claude-bridge.mjs");
     check("it can tell a vanished conversation from a real failure",
       lostTheConversation("Error: No conversation found with session ID abc") &&
