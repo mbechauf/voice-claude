@@ -5,7 +5,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { isInstalled as tidyUpInstalled, whatItMeant, whyNotToTrust } from "./cleanup.mjs";
@@ -20,6 +20,23 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const env = { ...process.env, VOICE_CLAUDE_PORT: String(PORT) };
 delete env.OPENAI_API_KEY;
 
+// Pointed at a scratch file, and this one is not optional. The app now sweeps up what
+// a previous run left behind the moment it starts, so a check that shared the real
+// record would end the voice and the tidy-up belonging to a live session — this test
+// killing the app somebody is actually driving with. Isolation here is a safety
+// measure, not tidiness.
+const scratchRunning = path.join(root, ".voice-claude", "running.check.json");
+env.VOICE_CLAUDE_RUNNING_FILE = scratchRunning;
+fs.rmSync(scratchRunning, { force: true });
+// And it must not close a session somebody has walked away from to a desk. Sweeping
+// those is right when the app really starts and wrong when a test does.
+env.VOICE_CLAUDE_LEAVE_HANDOVERS = "1";
+// Its own conversation helper, on its own socket. Stopping now genuinely stops that
+// helper — which is the point of the change — and the one this machine is really using
+// must not be the one a test stops. Sharing it would mean running the checks ended the
+// conversations of whoever was mid-drive.
+env.VOICE_CLAUDE_SESSION_SOCKET = path.join(root, ".voice-claude", "session.check.sock");
+
 const server = spawn("node", [path.join(here, "index.mjs")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
 
 let banner = "";
@@ -31,6 +48,113 @@ const results = [];
 
 function check(name, passed, detail = "") {
   results.push({ name, passed, detail });
+}
+
+// Ending things is the one job here that can do real harm if it is wrong. Every other
+// fault in this app costs a repeated question; this one can kill somebody's editor. So
+// the refusals are checked harder than the successes.
+async function checkItOnlyEndsItsOwn() {
+  const scratch = path.join(root, ".voice-claude", "running.rules.json");
+  process.env.VOICE_CLAUDE_RUNNING_FILE = scratch;
+  fs.rmSync(scratch, { force: true });
+
+  // Loaded fresh so it reads the scratch file rather than anything already held.
+  const register = await import(`./running.mjs?rules=${Date.now()}`);
+  const held = [];
+  const holdOne = () => {
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    held.push(child);
+    return child;
+  };
+  const alive = (pid) => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+
+  try {
+    // ---- a record whose process has gone is dropped, not acted on ----
+    const shortLived = spawn("sleep", ["30"], { stdio: "ignore" });
+    register.noteStarted({ what: "something brief", pid: shortLived.pid, rule: register.WITH_THE_APP });
+    shortLived.kill("SIGKILL");
+    await new Promise((r) => setTimeout(r, 300));
+    const gone = register.end(register.written().find((e) => e.pid === shortLived.pid));
+    check("a record whose process has gone is simply dropped", gone.ended === false, gone.why);
+    check("and the record goes with it", !register.written().some((e) => e.pid === shortLived.pid));
+
+    // ---- THE ONE THAT MATTERS: a number that now belongs to something else ----
+    //
+    // Process numbers get reused. A record naming something that has died and had its
+    // number handed to a browser or an editor must never be acted on. This is checked
+    // by writing down a record that deliberately does not match the process wearing
+    // that number, and requiring that the process survives.
+    const stranger = holdOne();
+    register.noteStarted({ what: "a stranger", pid: stranger.pid, rule: register.WITH_THE_APP });
+    const all = register.written();
+    const wrong = all.map((e) =>
+      e.pid === stranger.pid ? { ...e, startedAt: "Mon Jan  1 00:00:00 2001", command: "/not/what/is/there" } : e,
+    );
+    fs.writeFileSync(scratch, `${JSON.stringify(wrong, null, 2)}\n`);
+    const refused = register.end(wrong.find((e) => e.pid === stranger.pid));
+    check("it refuses to end a number that now belongs to something else", refused.ended === false, refused.why);
+    check("and the process it refused to end is still alive", alive(stranger.pid));
+
+    // ---- the same refusal at startup, where the sweep runs unattended ----
+    fs.writeFileSync(scratch, `${JSON.stringify(wrong, null, 2)}\n`);
+    const swept = register.sweep();
+    check("the startup sweep refuses it too", alive(stranger.pid) && swept.swept.length === 0);
+    check("and clears the record rather than trying again forever", register.written().length === 0);
+
+    // ---- the three kinds end on the right occasions and not the wrong ones ----
+    const goesWithIt = holdOne();
+    const survivesRestart = holdOne();
+    const outlives = holdOne();
+    register.noteStarted({ what: "a helper", pid: goesWithIt.pid, rule: register.WITH_THE_APP });
+    register.noteStarted({ what: "the conversation helper", pid: survivesRestart.pid, rule: register.ACROSS_RESTARTS });
+    register.noteStarted({ what: "a handover", pid: outlives.pid, rule: register.OUTLIVES_ON_PURPOSE });
+
+    register.endEverything([register.WITH_THE_APP]); // what a restart does
+    await new Promise((r) => setTimeout(r, 300));
+    check("restarting ends what only serves the running app", !alive(goesWithIt.pid));
+    check("restarting leaves the conversation helper alone", alive(survivesRestart.pid));
+    check("restarting leaves a handed-over session alone", alive(outlives.pid));
+
+    register.endEverything([register.WITH_THE_APP, register.ACROSS_RESTARTS]); // a deliberate stop
+    await new Promise((r) => setTimeout(r, 300));
+    check("stopping for good ends the conversation helper too", !alive(survivesRestart.pid));
+    check("but a handed-over session still outlives it", alive(outlives.pid));
+
+    // ---- and it can say what it has, in words ----
+    const said = register.whatIsRunning();
+    const handover = said.find((one) => one.pid === outlives.pid);
+    check(
+      "it can say what is running and why, in words",
+      Boolean(handover?.whyItIsStillHere) && handover.running === true,
+      handover?.whyItIsStillHere ?? "said nothing",
+    );
+  } finally {
+    for (const child of held) { try { child.kill("SIGKILL"); } catch {} }
+    fs.rmSync(scratch, { force: true });
+    process.env.VOICE_CLAUDE_RUNNING_FILE = scratchRunning;
+  }
+}
+
+// The limits on the Python side are its own check, run here so one command still
+// answers "is this sound". Skipped rather than failed when Python is missing: not
+// having it is a fair state for this app to be in, and a check that fails for that
+// reason teaches people to ignore failures.
+function checkConversationsAreLetGoOf() {
+  const test = path.join(here, "session", "check-limits.py");
+  const python = ["python3", "/usr/bin/python3"].find((p) => {
+    try { execFileSync(p, ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
+  });
+  if (!python) return check("conversations are let go of", true, "no python here — skipped");
+  try {
+    const out = execFileSync(python, [test], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const failed = (out.match(/^FAIL/gm) ?? []).length;
+    const passed = (out.match(/^ok/gm) ?? []).length;
+    check("conversations are let go of when idle, and capped", failed === 0, `${passed} checks`);
+  } catch (err) {
+    check("conversations are let go of when idle, and capped", false, (err.stdout ?? err.message).toString().trim().split("\n").pop());
+  }
 }
 
 // Whether it can tell your voice from its own is what decides if interrupting it
@@ -903,6 +1027,8 @@ try {
     `${setup.readOutPage} at a time, ${spoken.length} commands`,
   );
 
+  await checkItOnlyEndsItsOwn();
+  checkConversationsAreLetGoOf();
   checkItKnowsItsOwnVoice();
   checkTheGuard();
   checkFillerComesOut();

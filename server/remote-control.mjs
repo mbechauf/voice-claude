@@ -28,16 +28,86 @@ const TERMINAL = "/usr/bin/screen";
 
 const nameFor = (project) => `voice-${project.split("/").filter(Boolean).pop() ?? "session"}`;
 
+// Everything this app hands to a screen is named this way, which is what makes one
+// recognisable later as ours and not somebody else's terminal. Nothing outside this
+// prefix is ever touched.
+const OURS = /^\d+\.(voice-[^\s\t]+)/;
+
+// How long a handed-over session may sit before it stops being anybody's live work.
+// It is meant to outlive the app — you stop driving and walk to your desk — but
+// "outlives" is not "forever", and one was found still holding a conversation twelve
+// hours after the drive that started it had ended.
+const TOO_OLD_MS = Number(process.env.VOICE_CLAUDE_HANDOVER_HOURS ?? 12) * 60 * 60 * 1000;
+
 /** Is one already running for this project? */
 export function alreadyRunning(project) {
+  return handoversRunning().includes(nameFor(project));
+}
+
+/**
+ * Every session this app has handed over that is still running, by name.
+ *
+ * Asked of the machine rather than remembered, because a remembered process number is
+ * the wrong identity for these: the thing that survives is not the process this app
+ * started, it is the one that process forked before exiting. The name is what lasts,
+ * so the name is what is tracked.
+ */
+export function handoversRunning() {
   try {
     const listed = execFileSync(TERMINAL, ["-ls"], { encoding: "utf8" });
-    return listed.includes(nameFor(project));
+    return listed
+      .split("\n")
+      .map((line) => line.trim().match(OURS)?.[1])
+      .filter(Boolean);
   } catch {
-    // Screen exits non-zero when there are no sessions at all, which is not an error
-    // and means exactly what an empty list means.
-    return false;
+    // Screen exits non-zero when there are none at all, which is not an error.
+    return [];
   }
+}
+
+function quit(name) {
+  try {
+    execFileSync(TERMINAL, ["-S", name, "-X", "quit"]);
+    return true;
+  } catch {
+    return false; // already gone, which is the state we wanted it in
+  }
+}
+
+/**
+ * Close any handed-over session that is no longer anybody's live work.
+ *
+ * Two ways one stops counting. It has no handover on record — meaning this app has
+ * already taken the work back, or the record was lost, and either way nothing is
+ * coming for it. Or it is simply too old to be live.
+ *
+ * Both were needed. The one that prompted this was six hours old AND unrecorded,
+ * holding a conversation that had long since been replaced, and the only reason it
+ * was ever found was somebody reading a process list by hand.
+ *
+ * Nothing outside this app's own naming is looked at, let alone closed.
+ */
+export function sweepHandovers({ now = Date.now(), say = () => {} } = {}) {
+  const closed = [];
+  // The self-check boots a real server, and a test that closed the session somebody
+  // had walked away from would be doing the exact harm this is meant to prevent.
+  if (process.env.VOICE_CLAUDE_LEAVE_HANDOVERS === "1") return closed;
+  for (const name of handoversRunning()) {
+    const project = Object.values(PROJECTS).find((p) => nameFor(p.at) === name)?.at;
+    const handover = project ? outstandingHandover(project) : null;
+
+    let why = null;
+    if (!handover) why = "nothing was waiting for it";
+    else if (now - new Date(handover.at).getTime() > TOO_OLD_MS) why = "it was too old to be live work";
+    if (!why) continue;
+
+    if (quit(name)) {
+      if (project) pickedBackUp(project);
+      closed.push({ name, why });
+      say(`  closed a handed-over session — ${why}`);
+    }
+  }
+  return closed;
 }
 
 /**
@@ -182,9 +252,5 @@ export function takeBackOver(project) {
   const handover = outstandingHandover(project);
   pickedBackUp(project);
   if (!handover?.name) return;
-  try {
-    execFileSync(TERMINAL, ["-S", handover.name, "-X", "quit"]);
-  } catch {
-    // Already gone, which is the state we wanted it in anyway.
-  }
+  quit(handover.name);
 }
