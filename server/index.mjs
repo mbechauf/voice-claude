@@ -33,7 +33,7 @@ import {
   WHAT_EACH_DOES,
 } from "./config.mjs";
 import { forgetConversation, isBusy, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
-import { recall } from "./conversations.mjs";
+import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver } from "./remote-control.mjs";
 import { since } from "./watching.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
@@ -51,7 +51,10 @@ import {
 // can see, and which repository an issue is filed against. It is said out loud and
 // repeated back, because a project chosen by mistake does its damage quietly while
 // you are watching the road.
-let project = STARTING_PROJECT;
+// Remembered rather than started fresh, because this app restarts several times an
+// hour and every one of those used to put you back on the project the settings begin
+// with — silently, in the middle of a drive, after you had said otherwise.
+let project = whereWeWere() ?? STARTING_PROJECT;
 
 const nameOf = (dir) =>
   Object.entries(PROJECTS).find(([, p]) => p.at === dir)?.[0] ?? path.basename(dir);
@@ -59,8 +62,12 @@ const nameOf = (dir) =>
 // Claude is told, every time the project changes, that it is the whole world for
 // this conversation. The folder it runs in is the real boundary; this is so it does
 // not go looking for something helpful in a neighbouring project and change that.
-const boundary = () =>
-  `You are working on ${nameOf(project)}, at ${project}. Everything you are asked ` +
+// Takes the project rather than reading the one the car is on, because a question
+// typed at a screen is about the project that screen is showing, which is not always
+// the same one. Getting this from a variable instead of from the question is what
+// sent a typed question into a project nobody was looking at.
+const boundary = (at = project) =>
+  `You are working on ${nameOf(at)}, at ${at}. Everything you are asked ` +
   `for is about that project and nothing else: read, change and file issues only ` +
   `there. If something you need appears to be in another project, say so and stop ` +
   `rather than reaching into it. ` +
@@ -72,7 +79,7 @@ const boundary = () =>
   `That limit can be lifted, and you must say how rather than leaving it as a dead ` +
   `end. The words that lift it are "work on" (or "switch to") followed by the ` +
   `project — "work on ${
-    Object.keys(PROJECTS).filter((n) => PROJECTS[n].at !== project)[0] ?? "the other project"
+    Object.keys(PROJECTS).filter((n) => PROJECTS[n].at !== at)[0] ?? "the other project"
   }", or the name of any other. ` +
   // Saying only "they change project by saying it out loud" is what caused the fault
   // this wording now guards against: a project merely NAMED in passing was read as a
@@ -88,7 +95,7 @@ const boundary = () =>
   `cannot be done and never suggest starting a session somewhere else: say in one ` +
   `sentence the exact words that move it, and carry on where you are until a later ` +
   `question tells you otherwise. The projects are: ${Object.keys(PROJECTS).join(", ")}.` +
-  (project === PROJECTS["the voice app"].at
+  (at === PROJECTS["the voice app"].at
     ? ` You are working on the thing you are being spoken through, so a few things ` +
       `are true here that are not true elsewhere. ` +
       `What the phone decided, moment by moment, is in .voice-claude/trace.log — read ` +
@@ -234,10 +241,88 @@ function note(what, detail) {
   fs.appendFile(TRACE_FILE, `${line}\n`, () => {});
 }
 
-function broadcast(kind, text) {
-  const payload = `data: ${JSON.stringify({ kind, text })}\n\n`;
+// Everything the phone hears about carries how the question was put, because that is
+// what decides whether anything is said out loud. Nothing is hidden from anyone — the
+// phone is told about a typed question and simply stays quiet about it — which keeps
+// one conversation rather than two channels that have to be kept in step.
+function broadcast(kind, text, how = "spoken") {
+  const payload = `data: ${JSON.stringify({ kind, text, how })}\n\n`;
   for (const res of listeners) res.write(payload);
 }
+
+// ------------------------------------------------- questions, however they arrive
+
+// Typed questions waiting their turn. Only typed ones ever wait: a spoken question
+// takes over, exactly as it always has, because the person saying it is in a car and
+// has no way of knowing something else was already running.
+const waiting = [];
+
+/**
+ * One question, put to the one conversation.
+ *
+ * Both ways in come through here, and the only thing that differs is a word carried
+ * along with everything that comes back — spoken or typed. That word is what decides
+ * whether the answer is read out. Keeping it to that is deliberate: two ways of
+ * asking that took two different roads would be two conversations before long, and
+ * reconciling those is the mess this app has already been through once.
+ */
+async function put(request, how, { alreadyTidied = false, at = project } = {}) {
+  console.log(`\n${how === "typed" ? "⌨" : "→"} ${nameOf(at)}: ${request}`);
+
+  // Repaired here rather than on the phone, and after the gate rather than before
+  // it. The phone has to decide what is a command the instant it is said, and it
+  // does that by sound; this only has to be right about a finished question, and it
+  // can afford a third of a second to be right about the whole of it.
+  //
+  // Unless the phone already had every piece tidied at the pauses, which is the
+  // usual case and the whole point of doing it there: repairing it twice would put
+  // the delay back exactly where it was taken out of. Typing is the other case that
+  // needs none of it: nothing misheard what you typed.
+  const tidied = alreadyTidied
+    ? { text: request, changed: false, why: "" }
+    : await cleanUp(request, { project: at });
+  if (tidied.changed) {
+    console.log(`✓ ${tidied.text}`);
+    note("tidied up", `"${request}" → "${tidied.text}"`);
+    // Send it back so the phone can show what was actually asked. Without this the
+    // repair is invisible from the driver's seat, and a repair nobody can see reads
+    // exactly like a repair that never happened.
+    broadcast("tidied", tidied.text, how);
+  } else if (tidied.why) {
+    note("kept it as heard", tidied.why);
+  }
+
+  startWork(
+    tidied.text,
+    (kind, text) => {
+      console.log(`  ${kind}: ${text.slice(0, 120)}`);
+      broadcast(kind, text, how);
+      // The moment this one is done, whatever was typed while it ran gets its turn.
+      if (kind === "final" || kind === "error") setTimeout(takeTheNextOne, 0);
+    },
+    { briefing: `${speakingRules}\n\n${boundary(at)}`, standing: whereYouAre(at), project: at },
+  );
+}
+
+function takeTheNextOne() {
+  if (!waiting.length || isBusy()) return;
+  const next = waiting.shift();
+  // Carries its own project, so waiting its turn never moves it somewhere else.
+  put(next.request, "typed", { alreadyTidied: true, at: next.at }).catch((err) => {
+    note("a queued question went wrong", err.message);
+  });
+}
+
+// Looked at on a clock as well as when an answer finishes, because an answer does not
+// always finish. A spoken question takes over the one before it, and stopping kills it
+// outright — and neither of those says anything on the way out, by design: nobody in a
+// car wants to hear about the answer they just replaced. A question waiting on an
+// event that will never arrive waits for ever, which is exactly what happened: typing
+// while it was working, then speaking again, stranded what had been typed with nothing
+// on any screen to say so.
+//
+// So the queue is never told when to run. It looks for itself.
+setInterval(takeTheNextOne, 1_000).unref();
 
 // ------------------------------------------------------------------ helpers
 
@@ -341,6 +426,12 @@ async function handle(req, res) {
       // rather than leaving somebody to wonder why nothing is arriving.
       driving: nameOf(project),
       working: isBusy(),
+      // Said so a screen can show a typed question as waiting its turn rather than
+      // as ignored. Silence between typing something and it starting reads as broken.
+      // Named apart from the "nothing has been said here yet" note above it, because
+      // one of them quietly overwriting the other is exactly the kind of fault that
+      // shows up as a blank screen and no reason.
+      queued: waiting.length,
     });
   }
 
@@ -454,39 +545,42 @@ async function handle(req, res) {
   if (url.pathname === "/ask" && req.method === "POST") {
     const { request, alreadyTidied } = await readBody(req);
     if (!request) return send(res, 400, { error: "no request" });
-    console.log(`\n→ ${request}`);
+    await put(request, "spoken", { alreadyTidied });
+    return send(res, 202, { started: true });
+  }
 
-    // Repaired here rather than on the phone, and after the gate rather than before
-    // it. The phone has to decide what is a command the instant it is said, and it
-    // does that by sound; this only has to be right about a finished question, and it
-    // can afford a third of a second to be right about the whole of it.
-    //
-    // Unless the phone already had every piece tidied at the pauses, which is the
-    // usual case and the whole point of doing it there: repairing it twice would put
-    // the delay back exactly where it was taken out of.
-    const tidied = alreadyTidied
-      ? { text: request, changed: false, why: "" }
-      : await cleanUp(request, { project });
-    if (tidied.changed) {
-      console.log(`✓ ${tidied.text}`);
-      note("tidied up", `"${request}" → "${tidied.text}"`);
-      // Send it back so the phone can show what was actually asked. Without this the
-      // repair is invisible from the driver's seat, and a repair nobody can see reads
-      // exactly like a repair that never happened.
-      broadcast("tidied", tidied.text);
-    } else if (tidied.why) {
-      note("kept it as heard", tidied.why);
+  // A question typed at a screen. The same conversation, the same everything — the
+  // only difference is that nothing is said out loud, because somebody typing is
+  // looking at a screen and a voice starting up at whoever else is in the room is
+  // simply wrong.
+  if (url.pathname === "/typed" && req.method === "POST") {
+    const { request, project: named } = await readBody(req);
+    if (!request?.trim()) return send(res, 400, { error: "nothing to ask" });
+
+    // The screen says which project it is showing, and the question goes there — not
+    // to wherever the car happens to be. Reading it from the car instead is what sent
+    // a typed question into a project nobody was looking at: it ran, it answered, and
+    // it did all of it somewhere the person typing could not see. A screen that shows
+    // one project and types into another is worse than one that cannot type at all.
+    const at = named && PROJECTS[named] ? PROJECTS[named].at : project;
+
+    // Never over the top of an answer somebody is waiting on. Interrupting already
+    // has a way to be asked for, out loud; a sentence typed in another room killing
+    // a drive's answer would be a nasty surprise with no explanation attached.
+    if (isBusy()) {
+      waiting.push({ request: request.trim(), at });
+      note("typed, queued", `${nameOf(at)}: ${request.trim().slice(0, 70)}`);
+      return send(res, 202, { queued: waiting.length, project: nameOf(at) });
     }
 
-    startWork(
-      tidied.text,
-      (kind, text) => {
-        console.log(`  ${kind}: ${text.slice(0, 120)}`);
-        broadcast(kind, text);
-      },
-      { briefing: `${speakingRules}\n\n${boundary()}`, standing: whereYouAre(), project },
-    );
-    return send(res, 202, { started: true });
+    await put(request.trim(), "typed", { alreadyTidied: true, at });
+    return send(res, 202, { started: true, project: nameOf(at) });
+  }
+
+  if (url.pathname === "/never-mind" && req.method === "POST") {
+    const dropped = waiting.length;
+    waiting.length = 0;
+    return send(res, 200, { dropped });
   }
 
   // What the phone is actually doing, said out loud on the Mac. Dictation goes wrong
@@ -522,6 +616,7 @@ async function handle(req, res) {
     }
 
     project = PROJECTS[match].at;
+    nowWorkingOn(project);
     // Each project keeps its own conversation, so switching neither carries the old
     // one across — which would answer about the wrong code with total confidence —
     // nor throws it away. Come back later and the work you left here is still here.

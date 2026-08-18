@@ -81,6 +81,28 @@ function setAside() {
 }
 
 /** The conversation last used for this project, or null. */
+// Which project we are on, kept with the conversations rather than only in the
+// running app. The app restarts whenever its own code changes — several times an hour
+// while it is being worked on — and until now every one of those quietly put you back
+// on whichever project the settings start with. You said "work on the voice app" ten
+// minutes ago, nothing said otherwise, and everything since had been going somewhere
+// else. A change nobody made and nobody was told about is the worst kind.
+//
+// Under a key no folder can collide with, because every real key here is a path.
+const WHERE_WE_ARE = "#on";
+
+export function nowWorkingOn(project) {
+  const all = load();
+  if (all === null) return; // damaged; leave it alone rather than write over it
+  all[WHERE_WE_ARE] = project;
+  save(all);
+}
+
+export function whereWeWere() {
+  const on = load()?.[WHERE_WE_ARE];
+  return typeof on === "string" ? on : null;
+}
+
 export function recall(project) {
   const kept = load()?.[project];
   if (!kept?.id) return null;

@@ -210,7 +210,15 @@ const forgetDrive = () => fetch("/new", { method: "POST" }).catch(() => {});
 function listenForResults(handle) {
   results = new EventSource("/events");
   results.onmessage = (message) => {
-    const { kind, text } = JSON.parse(message.data);
+    const { kind, text, how } = JSON.parse(message.data);
+
+    // A question typed at a screen is not this page's business. Talking and typing
+    // are two modes rather than a mixture: somebody typing is looking at a screen,
+    // and a voice starting up at whoever else is in the room — or worse, at a driver
+    // who did not ask anything — is simply wrong. It is told about it and stays
+    // quiet, rather than being kept in the dark, so there is still one conversation.
+    if (how === "typed") return;
+
     if (kind === "final") lastAnswer = text;
 
     // The Mac has repaired the sentence that was just sent. You never saw that
