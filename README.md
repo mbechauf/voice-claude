@@ -225,6 +225,18 @@ It never quietly cuts. A conversation replaced underneath it, a place that no lo
 too long to show in full: each of those is said on the screen rather than papered over, because a
 viewer that silently skips is worse than one that admits a gap.
 
+There is a box at the bottom of it to type into, and what you type goes to the same conversation the
+car has been using—not a second one. **Either you are talking or you are typing:** a typed question
+is never read out loud, because you are looking at a screen and a voice starting up at whoever else
+is in the room, or at a driver who did not ask anything, is simply wrong. Talking behaves exactly as
+it always has. Nothing has to be switched: it is decided by how the question arrived, so it cannot be
+left set the wrong way.
+
+A typed question never starts over the top of an answer somebody is waiting on—it waits its turn, and
+says on the screen that it is waiting. Interrupting is still a thing you ask for out loud. Spoken
+questions do not wait, because the person speaking is driving and has no way of knowing something
+else was already running.
+
 ### How well does it understand you?
 
 ```bash

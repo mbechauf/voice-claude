@@ -894,6 +894,25 @@ try {
 
   const watchingPage = await (await fetch(`${base}/watching`)).text();
   check("serves the page a screen watches from", watchingPage.includes("/watching/since"));
+  // Typing and talking are two modes rather than a mixture. The half that matters
+  // most is the refusal: a question typed at a screen must never make a phone in
+  // somebody's pocket — or a car — start talking about it.
+  const drivingPage = await (await fetch(`${base}/`)).text();
+  check("the driving page stays quiet about anything typed", drivingPage.includes('how === "typed"'));
+  const watchPage = await (await fetch(`${base}/watching`)).text();
+  check("the watching screen has somewhere to type", watchPage.includes('id="typed"') && watchPage.includes("/typed"));
+  check("and says out loud that nothing will be spoken", watchPage.includes("read out loud"));
+
+  const nothing = await fetch(`${base}/typed`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request: "   " }),
+  });
+  check("an empty typed question is refused rather than started", nothing.status === 400, `got ${nothing.status}`);
+
+  const cleared = await (await fetch(`${base}/never-mind`, { method: "POST" })).json();
+  check("typed questions waiting their turn can be dropped", typeof cleared.dropped === "number");
+
   const watchingFeed = await (await fetch(`${base}/watching/since`)).json();
   check("tells a screen which projects there are", Array.isArray(watchingFeed.projects));
   check("tells a screen where the car is", Boolean(watchingFeed.driving));
