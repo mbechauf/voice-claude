@@ -17,6 +17,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { ACROSS_RESTARTS, isStillItself, noteEnded, noteStarted, written } from "./running.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 
@@ -76,6 +78,18 @@ export function startIfNeeded() {
       stdio: ["ignore", log, log],
     });
     child.unref();
+
+    // Written down as something that survives a restart on purpose, which is the
+    // whole reason it was cut loose. It being unowned was right; it being unrecorded
+    // was not — nothing could then find it, report it, or ever end it, so "turn it
+    // off and on again" cleared nothing at all.
+    noteStarted({
+      what: "the conversation helper",
+      pid: child.pid,
+      rule: ACROSS_RESTARTS,
+      recogniseBy: "session/holder.py",
+      note: "holds one live conversation per project",
+    });
 
     return waitUntilUp();
   });
@@ -138,6 +152,67 @@ export function ask({ project, ask: question, resume = null }, onMessage) {
       if (!answered) reject(new Error("the session closed without answering"));
     });
   });
+}
+
+/** A small question to the holder that expects one line back. Null if it is not there. */
+function askQuietly(request, patience = 2_000) {
+  return new Promise((resolve) => {
+    const sock = net.connect(SOCKET);
+    let done = false;
+    const give = (answer) => {
+      if (done) return;
+      done = true;
+      try { sock.destroy(); } catch {}
+      resolve(answer);
+    };
+    sock.on("connect", () => sock.write(`${JSON.stringify(request)}\n`));
+    sock.on("data", (chunk) => {
+      try { give(JSON.parse(chunk.toString().split("\n")[0])); } catch { give(null); }
+    });
+    sock.on("error", () => give(null));
+    setTimeout(() => give(null), patience);
+  });
+}
+
+/**
+ * What conversations it is holding open, so somebody asking what is running gets the
+ * truth rather than only the process it lives in. Null when it is not running.
+ */
+export function whatIsOpen() {
+  return askQuietly({ what: "ping" }).then((said) => (said?.kind === "alive" ? said : null));
+}
+
+/**
+ * Stop it, properly.
+ *
+ * Asked first rather than killed, so it can close its conversations on the way out
+ * instead of leaving Claude processes orphaned underneath it — killing the parent of
+ * something is not the same as ending the something. Killed only if it will not go,
+ * and never on the strength of a stored number alone: that check lives in the file
+ * that keeps the record.
+ */
+export async function stop({ patience = 6_000 } = {}) {
+  if (!(await isRunning())) return false;
+
+  // Which process it is, so this can wait for the process rather than only for the
+  // socket. The socket goes first and the process takes a moment longer to finish
+  // closing its conversations — long enough that whatever tidies up next found it
+  // still alive and killed it a second time, mid-goodbye.
+  const mine = written().find((e) => e.rule === ACROSS_RESTARTS && isStillItself(e));
+
+  await askQuietly({ what: "stop" });
+
+  const until = Date.now() + patience;
+  while (Date.now() < until) {
+    const socketGone = !(await isRunning());
+    const processGone = !mine || !isStillItself(mine);
+    if (socketGone && processGone) {
+      if (mine) noteEnded(mine.pid);
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
 }
 
 /** Let go of a project's conversation, so the next question starts a fresh one. */

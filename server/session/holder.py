@@ -22,9 +22,11 @@
 #   they keep working unchanged.
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -44,6 +46,21 @@ from claude_agent_sdk import (
 # itself the answer to "is it running".
 SOCKET = Path(os.environ.get("VOICE_CLAUDE_SESSION_SOCKET", "/tmp/voice-claude-session.sock"))
 
+# How long a conversation may sit untouched before it is closed, and how many may be
+# open at once. Both deliberately generous: closing one that was about to be used again
+# costs a slow question and the thread that was in it, so the bias is towards keeping.
+# But "never" was the old value for both, and a drive that touched five projects ended
+# holding five conversations until somebody killed this process by hand.
+IDLE_LIMIT_S = float(os.environ.get("VOICE_CLAUDE_CONVERSATION_IDLE_S", 30 * 60))
+MOST_OPEN = int(os.environ.get("VOICE_CLAUDE_CONVERSATIONS_OPEN", 3))
+# How often to look. Frequent enough to matter, rare enough to be invisible.
+SWEEP_EVERY_S = 60.0
+
+
+# Set when the app asks it to go. Made inside the loop that runs, because an event
+# built before there is one belongs to the wrong loop and never wakes anybody.
+stopping = None
+
 
 def tell(writer, kind, **rest):
     """One message to the app. Newline-separated, so it can be read a line at a time."""
@@ -61,9 +78,11 @@ class Sessions:
 
     def __init__(self):
         self.open = {}          # project -> live client
-        self.busy = {}          # project -> the task currently answering
+        self.used = {}          # project -> when it was last spoken to
+        self.answering = {}     # project -> how many questions are in flight on it
 
     async def client_for(self, project, resume=None):
+        self.used[project] = time.monotonic()
         if project in self.open:
             return self.open[project]
 
@@ -79,10 +98,56 @@ class Sessions:
         client = ClaudeSDKClient(options=options)
         await client.connect()
         self.open[project] = client
+        # Room made only after the new one is in, so the count is honest and so a
+        # conversation is never closed to make room for one that then fails to start.
+        await self.make_room()
         return client
+
+    async def make_room(self):
+        """Close the least recently used, until no more than the ceiling are open.
+
+        Never one that is mid-answer: the point of a ceiling is to stop conversations
+        accumulating unnoticed, not to cut somebody off while they are waiting on one.
+        """
+        while len(self.open) > MOST_OPEN:
+            idle = [p for p in self.open if not self.answering.get(p)]
+            if not idle:
+                return  # every one of them is working; the ceiling can wait
+            oldest = min(idle, key=lambda p: self.used.get(p, 0))
+            print(f"closing {oldest} — more than {MOST_OPEN} open", flush=True)
+            await self.close(oldest)
+
+    async def close_the_idle(self):
+        """Close anything untouched for longer than the limit."""
+        now = time.monotonic()
+        for project in list(self.open):
+            if self.answering.get(project):
+                continue
+            if now - self.used.get(project, now) < IDLE_LIMIT_S:
+                continue
+            print(f"closing {project} — untouched for {IDLE_LIMIT_S / 60:.0f} minutes", flush=True)
+            await self.close(project)
+
+    async def close_everything(self):
+        for project in list(self.open):
+            await self.close(project)
+
+    def report(self):
+        """What is open, for somebody asking what this machine is running."""
+        now = time.monotonic()
+        return [
+            {
+                "project": project,
+                "idleSeconds": round(now - self.used.get(project, now)),
+                "answering": self.answering.get(project, 0),
+            }
+            for project in self.open
+        ]
 
     async def close(self, project):
         client = self.open.pop(project, None)
+        self.used.pop(project, None)
+        self.answering.pop(project, None)
         if client:
             try:
                 await client.disconnect()
@@ -95,6 +160,25 @@ async def answer(sessions, writer, request):
     project = request["project"]
     client = await sessions.client_for(project, resume=request.get("resume"))
 
+    # Counted while it is answering, so neither the idle limit nor the ceiling can
+    # close this conversation out from under somebody who is waiting on it.
+    #
+    # This is a guard for the sweeps only. Two questions arriving on the same project
+    # at once still collide over the one reply stream — a separate fault, with its own
+    # issue, and deliberately not fixed here.
+    sessions.answering[project] = sessions.answering.get(project, 0) + 1
+    try:
+        await run_the_question(sessions, writer, project, client, request)
+    finally:
+        left = sessions.answering.get(project, 1) - 1
+        if left > 0:
+            sessions.answering[project] = left
+        else:
+            sessions.answering.pop(project, None)
+        sessions.used[project] = time.monotonic()
+
+
+async def run_the_question(sessions, writer, project, client, request):
     await client.query(request["ask"])
     final = ""
     async for message in client.receive_response():
@@ -130,7 +214,18 @@ async def serve(reader, writer, sessions):
         request = json.loads(line)
 
         if request.get("what") == "ping":
-            tell(writer, "alive", projects=list(sessions.open))
+            # The detail, not just the names. Somebody asking what their machine is
+            # running deserves to hear how long each has been sitting there — that is
+            # the fact whose absence let an idle one go unnoticed for two hours.
+            tell(writer, "alive", projects=list(sessions.open), open=sessions.report())
+        elif request.get("what") == "stop":
+            # Asked to go, so it closes its conversations on the way out. Killing this
+            # process instead would leave every Claude underneath it orphaned, which is
+            # the same mess one level down.
+            await sessions.close_everything()
+            tell(writer, "stopping")
+            await writer.drain()
+            asyncio.get_running_loop().call_soon(stopping.set)
         elif request.get("what") == "forget":
             await sessions.close(request["project"])
             tell(writer, "forgotten")
@@ -153,15 +248,38 @@ async def serve(reader, writer, sessions):
             pass
 
 
+async def keep_it_tidy(sessions):
+    """Close what has gone cold. The one thing nothing here used to do."""
+    while True:
+        await asyncio.sleep(SWEEP_EVERY_S)
+        try:
+            await sessions.close_the_idle()
+            await sessions.make_room()
+        except Exception as err:  # noqa: BLE001
+            # Tidying up is never worth taking the conversations down for.
+            print(f"tidying up went wrong: {err}", flush=True)
+
+
 async def main():
+    global stopping
+    stopping = asyncio.Event()
     sessions = Sessions()
     SOCKET.unlink(missing_ok=True)
     server = await asyncio.start_unix_server(
         lambda r, w: serve(r, w, sessions), path=str(SOCKET)
     )
     print(f"session holder ready on {SOCKET}", flush=True)
+    tidying = asyncio.create_task(keep_it_tidy(sessions))
     async with server:
-        await server.serve_forever()
+        # Waits to be told to stop rather than running forever, so that being asked to
+        # go means closing the conversations properly instead of being killed with them
+        # still open underneath.
+        await stopping.wait()
+    tidying.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tidying
+    await sessions.close_everything()
+    print("session holder stopped", flush=True)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 import { SPEAKER_RATE, SPEAKER_VOICE } from "./config.mjs";
 
+import { noteEnded, noteStarted, WITH_THE_APP } from "./running.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 
@@ -49,6 +51,11 @@ function start() {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
+  // Written down so that a run which never got to tidy up — a crash, a hard kill —
+  // leaves a trace the next startup can act on. Without it this is exactly the kind of
+  // thing that is still holding a gigabyte of voice model an hour later.
+  noteStarted({ what: "the voice", pid: child.pid, rule: WITH_THE_APP, recogniseBy: "server/speech/worker.py" });
+
   let buffer = "";
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString();
@@ -82,6 +89,7 @@ function start() {
   });
 
   child.on("exit", () => {
+    noteEnded(child.pid);
     worker = null;
     ready = null;
     for (const pending of waiting.values()) pending.reject(new Error("the voice stopped"));

@@ -34,7 +34,15 @@ import {
 } from "./config.mjs";
 import { forgetConversation, isBusy, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
-import { handOver } from "./remote-control.mjs";
+import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
+import * as openSessions from "./session-holder.mjs";
+import {
+  ACROSS_RESTARTS,
+  endEverything,
+  sweep,
+  whatIsRunning,
+  WITH_THE_APP,
+} from "./running.mjs";
 import { since } from "./watching.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
@@ -159,6 +167,44 @@ const pageStamp = () =>
 const RESTART = 75;
 
 let restarting = false;
+let goingDown = false;
+
+/**
+ * On the way out, end what this run is responsible for — and nothing more.
+ *
+ * The whole difference between stopping and restarting lives in this one function.
+ * Restarting is this app swapping itself for a newer copy, so anything built to
+ * survive that is left alone. Stopping is a person saying they are finished, and then
+ * everything goes: the conversation helper too, which is what makes turning it off and
+ * on again actually clear something. Until now it cleared nothing, because stopping
+ * simply exited and left every process it had ever started behind it.
+ *
+ * See doc/cleaning-up-after-itself.md.
+ */
+async function leave({ code, why }) {
+  if (goingDown) return;
+  goingDown = true;
+  const forGood = code !== RESTART;
+  console.log(forGood ? `\nstopping — ${why}` : `\n== starting again: ${why}`);
+
+  try {
+    if (forGood) {
+      // Asked to go rather than killed, so it can close its conversations on the way
+      // out. Killing it would orphan every Claude underneath it — the same mess, one
+      // level down, and harder to see.
+      const went = await openSessions.stop().catch(() => false);
+      if (went) console.log("  ended the conversation helper");
+    }
+    endEverything(forGood ? [WITH_THE_APP, ACROSS_RESTARTS] : [WITH_THE_APP], {
+      say: (line) => console.log(line),
+    });
+  } catch (err) {
+    // Never let tidying up stop it going. A stuck exit is worse than a leftover, and
+    // the next startup sweeps anyway.
+    console.error(`  couldn't finish tidying up: ${err.message}`);
+  }
+  process.exit(code);
+}
 
 // Ctrl-C, or being killed, means a person wants it to stop — so it leaves the way
 // the script outside reads as "stay down". Without this, the loop faithfully starts
@@ -166,18 +212,19 @@ let restarting = false;
 // something that keeps itself alive and the wrong one.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
-    console.log(`\nstopping.`);
-    process.exit(0);
+    leave({ code: 0, why: "asked to" });
+    // A second one means somebody is impatient, and waiting for a tidy exit they have
+    // now asked twice to skip is its own kind of broken.
+    process.once(signal, () => process.exit(0));
   });
 }
 
 function startAgain(why) {
   if (restarting) return;
   restarting = true;
-  console.log(`\n== starting again: ${why}`);
   broadcast("restarting", why);
   // Let the phone hear about it before the connection dies under it.
-  setTimeout(() => process.exit(RESTART), 250);
+  setTimeout(() => leave({ code: RESTART, why }), 250);
 }
 
 // Its own code changing underneath it. Only while nothing is running — interrupting
@@ -630,6 +677,25 @@ async function handle(req, res) {
     return send(res, 200, { project: nameOf(project), at: project, projects: Object.keys(PROJECTS) });
   }
 
+  // One honest answer to "what have you got running, and why".
+  //
+  // This exists because none of it was discoverable. The only way to find out was to
+  // read the machine's process list by hand, which is precisely why a handed-over
+  // session sat orphaned for six hours and an abandoned conversation for two, with
+  // nobody any the wiser. Anything long-lived should be answerable for.
+  if (url.pathname === "/running") {
+    const open = await openSessions.whatIsOpen().catch(() => null);
+    return send(res, 200, {
+      started: whatIsRunning(),
+      // Asked of the helper rather than assumed, because the conversations live inside
+      // it and this app genuinely does not know them otherwise.
+      conversations: open?.open ?? [],
+      handedOver: handoversRunning(),
+      answering: isBusy(),
+      queued: waiting.length,
+    });
+  }
+
   // Asked for out loud, or by whatever just changed the code.
   if (url.pathname === "/restart" && req.method === "POST") {
     const { why } = await readBody(req);
@@ -745,6 +811,16 @@ const server = net.createServer((socket) => {
 
 server.listen(PORT, () => {
   console.log(`\nvoice-claude is up.`);
+
+  // Before anything new is started, clear what the last run left behind. A run that
+  // crashed never got to tidy up, and without this its leftovers simply stack up under
+  // the new ones — which is how a machine ends up carrying hours-old processes nobody
+  // remembers starting. Startup is the only moment where "everything still running was
+  // left by somebody else" is reliably true, so it is the right place to look.
+  const cleared = sweep({ say: (line) => console.log(line) });
+  const handovers = sweepHandovers({ say: (line) => console.log(line) });
+  if (cleared.swept.length || handovers.length) console.log("");
+
   console.log(`Working on:  ${nameOf(project)} — ${project}`);
   if (MODE === "realtime") {
     console.log(`Voice:       ${VOICE_MODEL} (${VOICE_NAME})`);

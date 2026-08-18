@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 
 import { EVERY_PROJECT_NAME, WORDS_WE_USE } from "./config.mjs";
 
+import { noteEnded, noteStarted, WITH_THE_APP } from "./running.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
 
@@ -202,6 +204,10 @@ function start() {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
+  // Same reason as the voice next door: a run that dies without tidying up should
+  // leave something the next startup can find and clear.
+  noteStarted({ what: "the dictation tidy-up", pid: child.pid, rule: WITH_THE_APP, recogniseBy: "server/cleanup/worker.py" });
+
   let buffer = "";
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString();
@@ -233,6 +239,7 @@ function start() {
   });
 
   child.on("exit", () => {
+    noteEnded(child.pid);
     worker = null;
     ready = null;
     for (const pending of waiting.values()) pending.reject(new Error("the tidy-up stopped"));

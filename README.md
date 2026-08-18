@@ -54,6 +54,15 @@ answer to pick up an edit is a poor trade. Say **"start yourself again"**, or ru
 to force it. Claude is told to run that itself after changing this app, and told never to ask you to
 restart it: you are driving and cannot. Set `VOICE_CLAUDE_WATCH=off` to only ever restart when asked.
 
+**It clears up after itself, and can be asked what it is running.** Run `npm run running` to see
+everything it has started, what each belongs to, how long it has been there, and why it is still
+alive. Restarting ends only the things that serve the running app; stopping ends the conversation
+helper too, so turning it off and on again genuinely clears the slate. A session handed to a screen
+outlives both on purpose, and is closed when the work comes back, when nothing is waiting for it, or
+after `VOICE_CLAUDE_HANDOVER_HOURS` (12 by default). Conversations held open are closed after 30
+minutes untouched and capped at three, never while one is mid-answer. Starting up begins by clearing
+what a previous run left behind. Why it works this way: `doc/cleaning-up-after-itself.md`.
+
 **The phone reloads with it.** Half of this runs in the browser, so a page left on the old code after
 the Mac has moved on is the genuinely confusing state—the two halves disagree and nothing says so. It
 waits for the Mac to come back, then loads itself again, carrying the question in progress across.
