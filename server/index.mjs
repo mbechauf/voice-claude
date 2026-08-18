@@ -35,6 +35,7 @@ import {
 import { forgetConversation, isBusy, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
 import { recall } from "./conversations.mjs";
 import { handOver } from "./remote-control.mjs";
+import { since } from "./watching.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
   cleanUp,
@@ -310,6 +311,37 @@ async function handle(req, res) {
   if (url.pathname === "/instructions") {
     const text = fs.readFileSync(path.join(here, "voice-instructions.md"), "utf8");
     return send(res, 200, text, "text/plain; charset=utf-8");
+  }
+
+  // A screen, watching. Deliberately its own page rather than a corner of the other
+  // one: every decision in the driving page follows from being unable to look at it,
+  // and a thing built for watching should be built for watching. Nothing here can
+  // affect the drive — it only ever reads.
+  if (url.pathname === "/watching") {
+    const html = fs.readFileSync(path.join(root, "web", "watching.html"), "utf8");
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store, must-revalidate",
+    });
+    return res.end(html);
+  }
+
+  // What has happened since the screen last looked. It says where it had got to and
+  // is told everything after that, so two screens and the car never take anything
+  // from each other, and one opened halfway through a drive still sees the lot.
+  if (url.pathname === "/watching/since") {
+    const named = url.searchParams.get("project");
+    const where = named ? (PROJECTS[named]?.at ?? named) : project;
+    const seen = since(where, url.searchParams.get("place"));
+    return send(res, 200, {
+      ...seen,
+      project: nameOf(where),
+      projects: Object.keys(PROJECTS),
+      // Which project the car is on, so a screen looking at another one can say so
+      // rather than leaving somebody to wonder why nothing is arriving.
+      driving: nameOf(project),
+      working: isBusy(),
+    });
   }
 
   // The phone asks what it is meant to be before it does anything, so that changing
@@ -637,6 +669,9 @@ server.listen(PORT, () => {
   }
   console.log(`\nOpen this on the phone:`);
   for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
+  // Said here rather than linked from the driving page, because the driving page is
+  // used by somebody who cannot look at it, and a link nobody can press is clutter.
+  console.log(`\nTo watch the work on a screen, add /watching to that address.`);
   console.log(`\nSafari will warn about the certificate the first time. Accept it.\n`);
   watchOwnCode();
 });

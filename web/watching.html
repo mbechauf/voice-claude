@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Watching</title>
+    <style>
+      /*
+        Built for reading, not for driving. The other page is all thumb-sized targets
+        and huge text because it is used without looking; this one is used by someone
+        sitting still and looking straight at it, so it is dense and quiet instead.
+      */
+      :root {
+        --page: #14161a;
+        --ink: #e7e9ee;
+        --dim: #8b929f;
+        --rule: #262a32;
+        --said: #cfe3ff;
+        --asked: #ffe0b2;
+        --step: #b8e6c8;
+        --wrong: #ffb4ab;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--ink);
+        font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-text-size-adjust: 100%;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 10px 16px;
+        background: rgba(20, 22, 26, 0.94);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--rule);
+        font-size: 13px;
+        color: var(--dim);
+      }
+      header select {
+        background: #1d2027;
+        color: var(--ink);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+        padding: 4px 8px;
+        font: inherit;
+      }
+      header .spacer { flex: 1; }
+      /* A quiet dot rather than a spinner: it says whether anything is happening
+         without ever being the thing your eye goes to. */
+      .pulse {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #3a4150; display: inline-block; margin-right: 6px;
+      }
+      .pulse.on { background: #7ee2a8; animation: breathe 1.6s ease-in-out infinite; }
+      .pulse.lost { background: #ffb4ab; }
+      @keyframes breathe { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+
+      main { padding: 8px 16px 96px; max-width: 1100px; }
+      .entry { padding: 8px 0; border-bottom: 1px solid var(--rule); }
+      .when { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+      .label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+      .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+      .asked .body { color: var(--asked); }
+      .said .body { color: var(--said); font-size: 16px; }
+      .step .name { color: var(--step); font-weight: 600; }
+      .step .why { color: var(--ink); }
+      .result .body, .step pre {
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--dim);
+        margin: 4px 0 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .result.failed .body { color: var(--wrong); }
+      .dropped { color: var(--dim); font-size: 11px; font-style: italic; }
+      /* Background is the briefing and the reminders — genuinely part of what
+         happened, so never hidden, but folded away so it is not what you read. */
+      details.background summary { color: var(--dim); font-size: 12px; cursor: pointer; }
+      details summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+      .thought { color: var(--dim); font-size: 12px; font-style: italic; }
+      .note {
+        margin: 10px 0;
+        padding: 8px 10px;
+        border-left: 3px solid #6f7787;
+        background: #1a1d24;
+        color: var(--dim);
+        font-size: 13px;
+      }
+      .waiting { color: var(--dim); padding: 24px 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span><span id="pulse" class="pulse"></span><span id="state">connecting</span></span>
+      <label>project <select id="project"></select></label>
+      <span id="elsewhere"></span>
+      <span class="spacer"></span>
+      <label><input type="checkbox" id="follow" checked /> follow</label>
+      <span id="count"></span>
+    </header>
+    <main id="stream"><div class="waiting">Waiting for the conversation…</div></main>
+
+    <script>
+      const stream = document.getElementById("stream");
+      const chooser = document.getElementById("project");
+      const pulse = document.getElementById("pulse");
+      const state = document.getElementById("state");
+      const elsewhere = document.getElementById("elsewhere");
+      const counter = document.getElementById("count");
+      const follow = document.getElementById("follow");
+
+      // Where this screen has got to. Its own, kept here and nowhere else, which is
+      // the whole reason two screens and the car cannot take anything from each
+      // other: nothing any of them does changes what the others are shown.
+      let place = null;
+      let chosen = null;
+      let shown = 0;
+      let emptied = false;
+      let quiet = false; // the last thing shown was a bare "thinking" marker
+      let waiting = null;
+
+      const at = (when) =>
+        when ? new Date(when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+
+      function line(happening) {
+        const row = document.createElement("div");
+        row.className = `entry ${happening.kind}${happening.failed ? " failed" : ""}`;
+
+        const head = document.createElement("div");
+        head.className = "when";
+        head.textContent = at(happening.when);
+        row.append(head);
+
+        if (happening.kind === "asked") {
+          // The briefing arrives in front of every spoken question and is long. It
+          // is folded rather than dropped, because a screen that shows less than
+          // what happened is worse than one that shows it dully.
+          if (happening.background || happening.text.length > 600) {
+            const fold = document.createElement("details");
+            fold.className = "background";
+            const cap = document.createElement("summary");
+            cap.textContent = happening.background
+              ? "background put to Claude"
+              : `asked — ${happening.text.slice(0, 90)}…`;
+            const body = document.createElement("div");
+            body.className = "body";
+            body.textContent = happening.text;
+            fold.append(cap, body);
+            row.append(fold);
+          } else {
+            row.append(label("asked"), body(happening.text));
+          }
+        } else if (happening.kind === "said") {
+          row.append(label("said"), body(happening.text));
+        } else if (happening.kind === "thought") {
+          const it = document.createElement("div");
+          it.className = "thought";
+          it.textContent = happening.text ? happening.text : "thinking…";
+          row.append(it);
+        } else if (happening.kind === "step") {
+          const top = document.createElement("div");
+          const name = document.createElement("span");
+          name.className = "name";
+          name.textContent = happening.name;
+          top.append(name);
+          if (happening.why) {
+            const why = document.createElement("span");
+            why.className = "why";
+            why.textContent = ` — ${happening.why}`;
+            top.append(why);
+          }
+          row.append(top);
+
+          const fold = document.createElement("details");
+          const cap = document.createElement("summary");
+          cap.textContent = "what exactly";
+          const detail = document.createElement("pre");
+          detail.textContent = readable(happening.detail);
+          fold.append(cap, detail);
+          row.append(fold);
+        } else if (happening.kind === "result") {
+          const fold = document.createElement("details");
+          const cap = document.createElement("summary");
+          const first = (happening.text || "").split("\n")[0].slice(0, 120);
+          cap.textContent = `${happening.failed ? "failed" : "came back"}${first ? ` — ${first}` : ""}`;
+          const out = document.createElement("div");
+          out.className = "body";
+          out.textContent = happening.text;
+          fold.append(cap, out);
+          if (happening.dropped) {
+            const cut = document.createElement("div");
+            cut.className = "dropped";
+            // Said out loud rather than trimmed quietly: a screen that silently cuts
+            // is a screen that lies about what came back.
+            cut.textContent = `${happening.dropped.toLocaleString()} more characters not shown`;
+            fold.append(cut);
+          }
+          row.append(fold);
+        }
+
+        return row;
+      }
+
+      function label(text) {
+        const it = document.createElement("div");
+        it.className = "label";
+        it.textContent = text;
+        return it;
+      }
+
+      function body(text) {
+        const it = document.createElement("div");
+        it.className = "body";
+        it.textContent = text;
+        return it;
+      }
+
+      function readable(detail) {
+        if (detail == null) return "";
+        if (typeof detail === "string") return detail;
+        // A command is the one thing worth reading as itself rather than as a record
+        // of one, because that is what you would have typed.
+        if (typeof detail.command === "string") return detail.command;
+        try {
+          return JSON.stringify(detail, null, 2);
+        } catch {
+          return String(detail);
+        }
+      }
+
+      function atBottom() {
+        return window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
+      }
+
+      async function look() {
+        const query = new URLSearchParams();
+        if (chosen) query.set("project", chosen);
+        if (place) query.set("place", place);
+
+        let seen;
+        try {
+          const answer = await fetch(`/watching/since?${query}`, { cache: "no-store" });
+          seen = await answer.json();
+        } catch {
+          // The Mac restarts several times an hour while it is being worked on. That
+          // is not an error worth shouting about — it says so quietly and keeps its
+          // place, so it carries on from exactly where it was when the Mac is back.
+          pulse.className = "pulse lost";
+          state.textContent = "waiting for the Mac";
+          return;
+        }
+
+        pulse.className = `pulse${seen.working ? " on" : ""}`;
+        state.textContent = seen.working ? "working" : "idle";
+
+        if (!chooser.options.length && Array.isArray(seen.projects)) {
+          for (const name of seen.projects) {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            chooser.append(option);
+          }
+        }
+        if (!chosen) {
+          chosen = seen.project;
+          chooser.value = seen.project;
+        }
+        elsewhere.textContent =
+          seen.driving && seen.driving !== seen.project ? `(the car is on ${seen.driving})` : "";
+
+        const stuck = follow.checked && atBottom();
+
+        if (seen.startedAgain || (seen.happenings?.length && !emptied)) {
+          stream.replaceChildren();
+          if (seen.startedAgain) shown = 0;
+          emptied = true;
+          quiet = false;
+        }
+
+        // Said on the screen rather than papered over: a conversation replaced
+        // underneath us, or a place that no longer exists.
+        if (seen.note) {
+          const note = document.createElement("div");
+          note.className = "note";
+          note.textContent = seen.note;
+          stream.append(note);
+        }
+
+        if (seen.happenings?.length) {
+          for (const happening of seen.happenings) {
+            // It thinks between almost every step, and the reasoning itself is not
+            // handed back, so a run of them is a column of identical markers. One
+            // marker says the same thing and leaves the screen readable.
+            const bare = happening.kind === "thought" && !happening.text;
+            if (bare && quiet) continue;
+            quiet = bare;
+            stream.append(line(happening));
+            shown += 1;
+          }
+          counter.textContent = `${shown} things`;
+        } else if (!emptied && seen.waiting && waiting !== seen.waiting) {
+          waiting = seen.waiting;
+          stream.replaceChildren(Object.assign(document.createElement("div"), {
+            className: "waiting",
+            textContent: seen.waiting,
+          }));
+        }
+
+        place = seen.place ?? place;
+        if (stuck) window.scrollTo(0, document.body.scrollHeight);
+      }
+
+      chooser.addEventListener("change", () => {
+        chosen = chooser.value;
+        place = null;
+        shown = 0;
+        emptied = false;
+        quiet = false;
+        waiting = null;
+        stream.replaceChildren();
+        look();
+      });
+
+      look();
+      // Often enough to feel live, rarely enough that it costs nothing. Asking is
+      // cheap because the answer is almost always "nothing since last time".
+      setInterval(look, 1_000);
+    </script>
+  </body>
+</html>

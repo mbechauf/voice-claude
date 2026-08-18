@@ -206,6 +206,25 @@ that it should stop and say so rather than reach into a neighbouring one.
 counts as changing project if what follows actually names one of yours. If it does not, both halves
 go back into the question exactly as spoken.
 
+### Watching the work on a screen
+
+Add `/watching` to the address you opened on the phone, on any screen you like—the Mac, an iPad, the
+phone itself. It shows what the car cannot: every step, what each one was for, what came back, and
+the answers in full, following along as they happen.
+
+It is deliberately its own page rather than a corner of the driving one, because every decision in
+the driving page follows from the person being unable to look at it. It only ever reads: there is no
+way to type into the conversation from there, and closing it changes nothing about the drive.
+
+Open it halfway through a drive and it shows you everything from the beginning, then keeps up. Open
+two of them and neither takes anything from the other or from the car—each keeps its own place. What
+it is reading is the conversation Claude Code already writes down as it goes, so it survives the app
+restarting, which happens whenever its own code changes.
+
+It never quietly cuts. A conversation replaced underneath it, a place that no longer exists, a result
+too long to show in full: each of those is said on the screen rather than papered over, because a
+viewer that silently skips is worse than one that admits a gap.
+
 ### How well does it understand you?
 
 ```bash
