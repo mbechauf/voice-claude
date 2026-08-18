@@ -858,6 +858,90 @@ async function checkAScreenCanWatch() {
   }
 }
 
+// An answer comes back the way the question went in: spoken to the car, written to
+// the screen. That rule rests on a single line in the driving page, and until now the
+// only thing guarding it was a search for that line's own text — which would still
+// have passed if the line were moved below the speaking, or turned around so that
+// typed answers were the only ones read out. So the page's ear is lifted out and fed
+// real frames, and the refusals are checked alongside the successes: a check that only
+// proves silence would also pass if the page had gone deaf altogether.
+function checkAnswersGoBackTheWayTheyCame() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const source = page.match(/function listenForResults[\s\S]*?\n}/);
+  if (!source) {
+    check("the driving page stays quiet about anything typed", false, "couldn't find that part of the page");
+    return;
+  }
+
+  // Everything the lifted piece leans on, stubbed so it can run outside a browser.
+  // What each frame did is recorded rather than acted on.
+  function run(frames) {
+    const seen = { handled: [], remembered: null, yourLine: null, restarted: false };
+    const build = new Function(`
+      let results = null;
+      let lastAnswer = null;
+      let wasRestarting = false;
+      let running = false;
+      const yourLineBox = { textContent: null };
+      const seen = arguments[0];
+      const yourLastLine = yourLineBox;
+      const trace = () => {};
+      const log = () => {};
+      const setState = () => {};
+      const comeBackFresh = () => { seen.restarted = true; };
+      const checkForANewPage = () => {};
+      class EventSource {
+        constructor() { this.onmessage = null; this.onerror = null; }
+        addEventListener() {}
+      }
+      ${source[0]}
+      listenForResults((kind, text) => seen.handled.push([kind, text]));
+      return (frame) => {
+        results.onmessage({ data: JSON.stringify(frame) });
+        seen.remembered = lastAnswer;
+        seen.yourLine = yourLineBox.textContent;
+      };
+    `)(seen);
+    for (const frame of frames) build(frame);
+    return seen;
+  }
+
+  const answer = "The tests pass, and the migration is the only file left.";
+
+  // Typed: nothing may reach the part of the page that speaks, and nothing may be
+  // remembered as the last answer either — what is remembered is what gets read out
+  // again and what its own voice is judged against, so a typed answer landing there
+  // would come out of the speaker by another road.
+  const typedFinal = run([{ kind: "final", text: answer, how: "typed" }]);
+  check("a typed answer never reaches the part that talks", typedFinal.handled.length === 0,
+    typedFinal.handled.map(([kind]) => kind).join(", ") || "nothing came through");
+  check("and a typed answer is not remembered as the last thing said", typedFinal.remembered === null);
+
+  // The repaired-question frame comes before the answer, so if the refusal ever moved
+  // below it the driver would watch their own screen rewrite itself with somebody
+  // else's typing. This is what catches the line being moved rather than removed.
+  const typedTidy = run([{ kind: "tidied", text: "what changed in the migration", how: "typed" }]);
+  check("and a typed question never rewrites the driver's own line", typedTidy.yourLine === null);
+
+  // The other direction, which is the half that catches the refusal being turned
+  // around or the page simply going deaf: spoken frames must still get through.
+  const spoken = run([{ kind: "final", text: answer, how: "spoken" }]);
+  check("a spoken answer still gets through to be read out",
+    spoken.handled.length === 1 && spoken.handled[0][1] === answer);
+  check("and a spoken answer is remembered as the last thing said", spoken.remembered === answer);
+
+  const spokenTidy = run([{ kind: "tidied", text: "what changed in the migration", how: "spoken" }]);
+  check("and a spoken question does rewrite the driver's own line",
+    spokenTidy.yourLine === "you: what changed in the migration");
+
+  // Nothing arrives without the word today, because the one road in always attaches
+  // it. If one ever did it came from the spoken side, which is what the server assumes
+  // when nothing says otherwise — so the two ends agree rather than quietly differing.
+  const unlabelled = run([{ kind: "final", text: answer }]);
+  check("a frame with nothing said about where it came from is treated as spoken",
+    unlabelled.handled.length === 1);
+}
+
 // The drawing half of the screen. Lifted out of the page and run here against a
 // pretend document, for the same reason the voice check is: a thing only ever
 // exercised by looking at it is a thing nobody notices has broken.
@@ -1039,17 +1123,17 @@ try {
   await checkItRemembersPerProject();
   await checkAScreenCanWatch();
   checkTheScreenCanDrawIt();
+  checkAnswersGoBackTheWayTheyCame();
 
   const watchingPage = await (await fetch(`${base}/watching`)).text();
   check("serves the page a screen watches from", watchingPage.includes("/watching/since"));
-  // Typing and talking are two modes rather than a mixture. The half that matters
-  // most is the refusal: a question typed at a screen must never make a phone in
-  // somebody's pocket — or a car — start talking about it.
-  const drivingPage = await (await fetch(`${base}/`)).text();
-  check("the driving page stays quiet about anything typed", drivingPage.includes('how === "typed"'));
+  // Typing and talking are two modes rather than a mixture. The refusal itself is
+  // exercised for real further up, by feeding the page's ear actual frames; all that
+  // is left here is that the screen offers somewhere to type and says on the box what
+  // will happen to it.
   const watchPage = await (await fetch(`${base}/watching`)).text();
   check("the watching screen has somewhere to type", watchPage.includes('id="typed"') && watchPage.includes("/typed"));
-  check("and says out loud that nothing will be spoken", watchPage.includes("read out loud"));
+  check("and the typing box says on it that nothing will be read out", watchPage.includes("read out loud"));
 
   const nothing = await fetch(`${base}/typed`, {
     method: "POST",
