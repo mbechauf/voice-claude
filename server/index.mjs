@@ -291,26 +291,30 @@ async function put(request, how, { alreadyTidied = false } = {}) {
       console.log(`  ${kind}: ${text.slice(0, 120)}`);
       broadcast(kind, text, how);
       // The moment this one is done, whatever was typed while it ran gets its turn.
-      // Waiting silently and then never running would be the worst of both.
-      if (kind === "final" || kind === "error") takeTheNextOne();
+      if (kind === "final" || kind === "error") setTimeout(takeTheNextOne, 0);
     },
     { briefing: `${speakingRules}\n\n${boundary()}`, standing: whereYouAre(), project },
   );
 }
 
-// Started on the next tick rather than from inside the callback that just finished,
-// so the answer that ended is fully delivered before the next question disturbs
-// anything.
 function takeTheNextOne() {
-  if (!waiting.length) return;
+  if (!waiting.length || isBusy()) return;
   const next = waiting.shift();
-  setTimeout(() => {
-    if (isBusy()) return waiting.unshift(next); // something else got in first; wait again
-    put(next, "typed", { alreadyTidied: true }).catch((err) => {
-      note("a queued question went wrong", err.message);
-    });
-  }, 50);
+  put(next, "typed", { alreadyTidied: true }).catch((err) => {
+    note("a queued question went wrong", err.message);
+  });
 }
+
+// Looked at on a clock as well as when an answer finishes, because an answer does not
+// always finish. A spoken question takes over the one before it, and stopping kills it
+// outright — and neither of those says anything on the way out, by design: nobody in a
+// car wants to hear about the answer they just replaced. A question waiting on an
+// event that will never arrive waits for ever, which is exactly what happened: typing
+// while it was working, then speaking again, stranded what had been typed with nothing
+// on any screen to say so.
+//
+// So the queue is never told when to run. It looks for itself.
+setInterval(takeTheNextOne, 1_000).unref();
 
 // ------------------------------------------------------------------ helpers
 
