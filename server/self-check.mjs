@@ -36,6 +36,15 @@ env.VOICE_CLAUDE_LEAVE_HANDOVERS = "1";
 // must not be the one a test stops. Sharing it would mean running the checks ended the
 // conversations of whoever was mid-drive.
 env.VOICE_CLAUDE_SESSION_SOCKET = path.join(root, ".voice-claude", "session.check.sock");
+// And on this process too, not only on the app it starts. The checks below load the
+// conversation helper directly to make sure that asking with nothing listening gives
+// up rather than hanging — and with only the child pointed somewhere safe, that load
+// fell back to the real socket. So the check aimed its question at the live helper, on
+// whatever project it was sitting in, and waited for a real answer to a conversation
+// already busy with somebody's actual work. It hung for hours, and the question it had
+// asked turned up unexplained in the middle of that person's session. The check that
+// hung was the one named for not hanging.
+process.env.VOICE_CLAUDE_SESSION_SOCKET = env.VOICE_CLAUDE_SESSION_SOCKET;
 
 const server = spawn("node", [path.join(here, "index.mjs")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
 
@@ -48,6 +57,7 @@ const results = [];
 
 function check(name, passed, detail = "") {
   results.push({ name, passed, detail });
+  console.log(`${passed ? "ok  " : "FAIL"}  ${name}${detail ? ` \u2014 ${detail}` : ""}`);
 }
 
 // Ending things is the one job here that can do real harm if it is wrong. Every other
@@ -996,6 +1006,15 @@ function checkTheScreenCanDrawIt() {
     briefing.children.some((kid) => kid.tag === "details") && text(briefing).includes("the standing briefing"));
 }
 
+async function bannerSays(words, patience = 15_000) {
+  const until = Date.now() + patience;
+  while (Date.now() < until) {
+    if (banner.includes(words)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
 async function waitForServer() {
   for (let i = 0; i < 50; i += 1) {
     try {
@@ -1069,7 +1088,14 @@ try {
     check("falls back to the phone's voice when the good one is missing", true, "the Mac voice is not installed");
   }
 
-  check("the banner says plainly that nothing is billed", banner.includes("nothing beyond the Claude subscription"));
+  // Waited for rather than read at whatever moment we happen to have reached. The app
+  // starts answering before it has finished introducing itself — the greeting is
+  // printed after it begins listening, and after two tidy-up sweeps that take as long
+  // as they take. Reading it the instant the first request succeeds is a race the
+  // check mostly won, which is the worst kind: it failed once in a while for no reason
+  // anybody could see, and the honest reading of that is a check nobody can trust.
+  check("the banner says plainly that nothing is billed",
+    await bannerSays("nothing beyond the Claude subscription"));
 
   const spoken = Object.entries(setup.phrases ?? {}).map(([name, said]) => [name, [said].flat()]);
   const everyWording = spoken.flatMap(([, wordings]) => wordings);
@@ -1153,8 +1179,5 @@ try {
 }
 
 const failed = results.filter((r) => !r.passed);
-for (const r of results) {
-  console.log(`${r.passed ? "ok  " : "FAIL"}  ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
-}
 console.log(failed.length ? `\n${failed.length} failed.` : `\nAll ${results.length} fine.`);
 process.exit(failed.length ? 1 : 0);
