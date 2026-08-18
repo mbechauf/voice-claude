@@ -398,7 +398,10 @@
           const answer = await fetch("/typed", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ request }),
+            // Which project this screen is showing goes with it. Without that the
+            // question lands wherever the car happens to be, runs there, answers
+            // there, and is invisible here — which is exactly what it did.
+            body: JSON.stringify({ request, project: chosen }),
           });
           if (!answer.ok) throw new Error(await answer.text());
           box.value = "";
