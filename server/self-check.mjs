@@ -173,13 +173,15 @@ function checkConversationsAreLetGoOf() {
 // page, so it is lifted out of there and exercised here rather than only in a car.
 function checkItKnowsItsOwnVoice() {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  // It leans on the word-picking helper next to it, so both come across together.
   const source = page.match(/function soundsLikeItself[\s\S]*?\n}/);
-  if (!source) {
+  const words = page.match(/function meaningfulWords[\s\S]*?\n}/);
+  if (!source || !words) {
     check("the page can tell your voice from its own", false, "couldn't find that part of the page");
     return;
   }
 
-  const soundsLikeItself = new Function(`${source[0]}; return soundsLikeItself;`)();
+  const soundsLikeItself = new Function(`${words[0]}; ${source[0]}; return soundsLikeItself;`)();
   const answer = "Another set of notes still says the adapter is the only copy of that file.";
 
   const cases = [
@@ -953,6 +955,155 @@ function checkAnswersGoBackTheWayTheyCame() {
     unlabelled.handled.length === 1);
 }
 
+// Everything this app says goes through one gate now, and the gate is what stands
+// between always-listening and it answering its own voice off the windscreen. It is
+// lifted out of the page and run here because the alternative is finding out at seventy
+// miles an hour. The refusals are checked alongside the successes: a gate that never
+// speaks would pass every echo test there is.
+async function checkOneVoice() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const parts = [
+    /function recentlySpoken\([\s\S]*?\n}/,
+    /function meaningfulWords\([\s\S]*?\n}/,
+    /function soundsLikeItself\([\s\S]*?\n}/,
+    /function intoSentences\([\s\S]*?\n}/,
+    /function oneVoice\([\s\S]*?\n}/,
+  ].map((wanted) => page.match(wanted));
+  if (parts.some((piece) => !piece)) {
+    check("the one voice everything speaks through", false, "couldn't find that part of the page");
+    return;
+  }
+  const build = (extra = "") =>
+    new Function(`const trace = () => {}; ${parts.map((p) => p[0]).join("\n")}; ${extra}`);
+
+  // A mouth that makes no noise but is honest about when it stopped.
+  const pretendMouth = () => {
+    const it = { said: [], prepared: [], finished: [], hushes: 0, waiting: null };
+    it.mouth = {
+      unlock() {},
+      startingAfresh() {},
+      prepare(sentence) { it.prepared.push(sentence); },
+      sayOne(sentence) {
+        it.said.push(sentence);
+        return new Promise((resolve) => { it.waiting = () => { it.finished.push(sentence); resolve(); }; });
+      },
+      hush() { it.hushes += 1; it.waiting?.(); it.waiting = null; },
+    };
+    it.endTheSentence = () => { const go = it.waiting; it.waiting = null; go?.(); };
+    return it;
+  };
+
+  // ---- two things at once are both said, in order, and neither is lost ----
+  {
+    const it = pretendMouth();
+    const ends = [];
+    const make = build(`return (mouth, onFinish) => oneVoice({ mouth, settleMs: 50, onFinish })`)();
+    const gate = make(it.mouth, () => ends.push("done"));
+    gate.speak("First thing.");
+    gate.speak("Second thing.");
+    await new Promise((r) => setTimeout(r, 0));
+    check("asking twice does not throw the first one away", it.said.length === 1 && it.said[0] === "First thing.",
+      it.said.join(" | ") || "nothing said");
+    it.endTheSentence();
+    await new Promise((r) => setTimeout(r, 0));
+    check("and the second waits its turn rather than cutting in",
+      it.said.join(" ") === "First thing. Second thing.", it.said.join(" | "));
+    it.endTheSentence();
+    await new Promise((r) => setTimeout(r, 5));
+    check("the end of talking is announced exactly once", ends.length === 1, `${ends.length} times`);
+    check("and it is not busy once the words have run out", gate.busy === false);
+  }
+
+  // ---- cut off part way: still announced once, and the rest is dropped ----
+  {
+    const it = pretendMouth();
+    const ends = [];
+    const make = build(`return (mouth, onFinish) => oneVoice({ mouth, settleMs: 50, onFinish })`)();
+    const gate = make(it.mouth, () => ends.push("done"));
+    gate.speak("One. Two. Three.");
+    await new Promise((r) => setTimeout(r, 0));
+    gate.silence();
+    await new Promise((r) => setTimeout(r, 5));
+    check("cutting it off still announces the end exactly once", ends.length === 1, `${ends.length} times`);
+    check("and what was queued behind it is dropped rather than played after", it.said.length === 1,
+      it.said.join(" | "));
+  }
+
+  // ---- sound that never ends is given up on, not waited for forever ----
+  {
+    const it = pretendMouth();
+    const ends = [];
+    const make = build(
+      `return (mouth, onFinish) => oneVoice({ mouth, settleMs: 20, allowanceFor: () => 40, onFinish })`,
+    )();
+    const gate = make(it.mouth, () => ends.push("done"));
+    gate.speak("A sentence whose sound never reports finishing.");
+    await new Promise((r) => setTimeout(r, 150));
+    check("a sentence whose sound never ends is given up on", ends.length === 1 && gate.busy === false,
+      `ended ${ends.length}, busy ${gate.busy}`);
+    check("and it says so by stopping the mouth rather than leaving it running", it.hushes >= 1);
+  }
+
+  // ---- the deaf window: its own tail is refused, a real reply is not ----
+  {
+    const it = pretendMouth();
+    const make = build(`return (mouth) => oneVoice({ mouth, settleMs: 5_000 })`)();
+    const gate = make(it.mouth);
+    gate.speak("The migration is the only file left to change.");
+    await new Promise((r) => setTimeout(r, 0));
+    it.endTheSentence();
+    await new Promise((r) => setTimeout(r, 5));
+    check("once the words have run out it is settling rather than talking",
+      gate.busy === false && gate.settling === true, `busy ${gate.busy}, settling ${gate.settling}`);
+
+    const itsOwnTail = build(
+      `return (saying, heard) => soundsLikeItself(heard, saying, { whenNothingDistinctive: false })`,
+    )();
+    check("its own tail coming back late is recognised as its own",
+      itsOwnTail(gate.saying, "the migration is the only file left to change") === true);
+    check("and a short reply of yours in that window is not eaten",
+      itsOwnTail(gate.saying, "yes go on") === false);
+    check("and a real question in that window still gets through",
+      itsOwnTail(gate.saying, "what about the billing problem") === false);
+  }
+
+  // ---- the thing it says to itself must not read back as an instruction ----
+  {
+    const it = pretendMouth();
+    const make = build(`return (mouth) => oneVoice({ mouth, settleMs: 5_000 })`)();
+    const gate = make(it.mouth);
+    gate.speak("Over to you.");
+    await new Promise((r) => setTimeout(r, 0));
+    it.endTheSentence();
+    await new Promise((r) => setTimeout(r, 5));
+    const itsOwn = build(
+      `return (saying, heard) => soundsLikeItself(heard, saying, { whenNothingDistinctive: false })`,
+    )();
+    // "over to you" is also one of the phrases that means send my question now, so this
+    // one is not tidiness: heard back, it is the app instructing itself.
+    check("what it says to hand back cannot be read back as an instruction",
+      itsOwn(gate.saying, "over to you") === true);
+  }
+
+  // ---- one word is not enough to cut its own answer off ----
+  {
+    const words = build("return meaningfulWords")();
+    check("a single word is not evidence enough to interrupt it", words("correlations").length < 2);
+    check("but somebody actually talking over it is", words("no stop that instead").length >= 2);
+  }
+
+  // ---- what it said stops counting once it is too old to still be in the air ----
+  {
+    const make = build(`return (now) => recentlySpoken({ forMs: 1_000, now })`)();
+    let clock = 10_000;
+    const said = make(() => clock);
+    said.add("the migration is the only file left");
+    check("what it just said counts as being in the air", said.count === 1);
+    clock += 5_000;
+    check("and stops counting once it is far too old to still be coming back", said.count === 0);
+  }
+}
+
 // The drawing half of the screen. Lifted out of the page and run here against a
 // pretend document, for the same reason the voice check is: a thing only ever
 // exercised by looking at it is a thing nobody notices has broken.
@@ -1280,6 +1431,7 @@ try {
   await checkAScreenCanWatch();
   checkTheScreenCanDrawIt();
   checkAnswersGoBackTheWayTheyCame();
+  await checkOneVoice();
 
   const watchingPage = await (await fetch(`${base}/watching`)).text();
   check("serves the page a screen watches from", watchingPage.includes("/watching/since"));

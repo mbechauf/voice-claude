@@ -357,28 +357,44 @@ function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
 // coming back off the windscreen. Both voices therefore keep a note of the last few
 // sentences they have said, so that what is heard can be checked against what was
 // just spoken. That check is what makes it safe to be interrupted mid-sentence.
-function recentlySpoken(keep = 3) {
-  const said = [];
+function recentlySpoken({ keep = 6, forMs = 12_000, now = () => Date.now() } = {}) {
+  let said = [];
+  const fresh = () => {
+    const cutoff = now() - forMs;
+    said = said.filter((one) => one.at >= cutoff);
+    return said;
+  };
   return {
     add(sentence) {
-      said.push(sentence);
+      fresh().push({ sentence, at: now() });
       while (said.length > keep) said.shift();
     },
-    get text() { return said.join(" "); },
+    // Everything still recent enough to be in the air, as one bag of words.
+    get text() { return fresh().map((one) => one.sentence).join(" "); },
+    get count() { return fresh().length; },
+    clear() { said = []; },
   };
 }
 
 // Its own voice coming back is mostly its own words. Yours are not.
-function soundsLikeItself(heard, spoken) {
+function meaningfulWords(text) {
+  return text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
+}
+
+// Its own voice coming back is mostly its own words. Yours are not.
+//
+// `whenNothingDistinctive` is the answer for a noise with no real words in it — "mm",
+// "yeah", "do it" — and it is deliberately different in the two situations this is
+// asked from. While sound is actually in the air, a mumble is far likelier to be the
+// echo than an instruction, and a wrongly ignored "mm" costs nothing. Once the sound
+// has stopped and we are only waiting out its tail, the same mumble is much likelier
+// to be you, and eating a short reply is the misfire people actually notice.
+function soundsLikeItself(heard, spoken, { whenNothingDistinctive = true } = {}) {
   if (!spoken) return false;
-  const meaningfulWords = (text) =>
-    text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
 
   const its = new Set(meaningfulWords(spoken));
   const mine = meaningfulWords(heard);
-  // Nothing distinctive was said, and it is mid-sentence: far likelier to be the
-  // echo than a real instruction, and a wrongly ignored "mm" costs nothing.
-  if (!mine.length) return true;
+  if (!mine.length) return whenNothingDistinctive;
 
   const shared = mine.filter((word) => its.has(word)).length;
   return shared / mine.length >= 0.5;
@@ -408,14 +424,12 @@ function intoSentences(text) {
   return parts;
 }
 
-function deviceMouth({ voiceName, rate, onStart, onFinish }) {
+function deviceMouth({ voiceName, rate }) {
   const synth = window.speechSynthesis;
   if (!synth) return null;
 
-  let queue = [];
-  let speaking = false;
   let chosen = null;
-  const spoken = recentlySpoken();
+  let stopThisOne = null;
 
   function pickVoice() {
     const voices = synth.getVoices();
@@ -438,22 +452,6 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
   synth.addEventListener?.("voiceschanged", () => { chosen = pickVoice(); });
   chosen = pickVoice();
 
-  function next() {
-    if (!queue.length) {
-      speaking = false;
-      onFinish?.();
-      return;
-    }
-    const sentence = queue.shift();
-    spoken.add(sentence);
-    const utterance = new SpeechSynthesisUtterance(sentence);
-    if (chosen) utterance.voice = chosen;
-    utterance.rate = rate ?? 1;
-    utterance.onend = next;
-    utterance.onerror = next; // a failed sentence must not strand the rest
-    synth.speak(utterance);
-  }
-
   return {
     // iPhones stay silent unless the first sound was asked for by a tap, so this is
     // called once from the Start button and the rest of the drive is hands-free.
@@ -462,23 +460,37 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
       silent.volume = 0;
       synth.speak(silent);
     },
-    speak(text) {
-      const parts = intoSentences(text);
-      if (!parts.length) return;
-      queue = parts;
-      if (!speaking) {
-        speaking = true;
-        onStart?.();
-        next();
-      }
+
+    // One sentence. Settles when the sound genuinely ended — not when a queue emptied,
+    // which is what used to be announced and is not the same thing at all. Whoever is
+    // above this owns the queue; this owns only the noise.
+    sayOne(sentence) {
+      return new Promise((resolve) => {
+        let settled = false;
+        const done = () => {
+          if (settled) return;   // the first one through wins
+          settled = true;
+          stopThisOne = null;
+          resolve();
+        };
+        // Being cut off has to settle it too, or the rest waits behind a sentence
+        // nobody is listening to any more. It is also why the cancelled utterance's own
+        // late end event now does no harm: it arrives second and is ignored, instead of
+        // advancing the queue a second time and cutting the next sentence in half.
+        stopThisOne = done;
+        const utterance = new SpeechSynthesisUtterance(sentence);
+        if (chosen) utterance.voice = chosen;
+        utterance.rate = rate ?? 1;
+        utterance.onend = done;
+        utterance.onerror = done;   // a failed sentence must not strand the rest
+        synth.speak(utterance);
+      });
     },
-    silence() {
-      queue = [];
-      synth.cancel();
-      if (speaking) { speaking = false; onFinish?.(); }
+
+    hush() {
+      try { synth.cancel(); } catch {}
+      stopThisOne?.();
     },
-    get busy() { return speaking; },
-    get saying() { return spoken.text; },
   };
 }
 
@@ -488,10 +500,9 @@ function deviceMouth({ voiceName, rate, onStart, onFinish }) {
 // phone does no talking at all; it just plays what arrives. The next sentence is
 // fetched while the current one plays, so the pause is only ever before the first.
 
-function macMouth({ fallback, onStart, onFinish, onTrouble }) {
-  let speaking = false;
-  let abandoned = false;
-  const spoken = recentlySpoken();
+function macMouth({ fallback, onTrouble }) {
+  let usingFallback = false;
+  const ready = new Map();   // a sentence, and the sound for it fetched ahead of time
 
   async function fetchSound(sentence) {
     const response = await fetch("/say", {
@@ -503,73 +514,169 @@ function macMouth({ fallback, onStart, onFinish, onTrouble }) {
     return response.arrayBuffer();
   }
 
-  async function read(parts) {
-    let pending;
-    try {
-      pending = fetchSound(parts[0]);
-      await pending;
-    } catch (err) {
-      // The good voice is unreachable. Better a rough voice than silence in a car.
-      trace("voice unreachable", err.message ?? err);
-      onTrouble?.(String(err.message ?? err));
-      speaking = false;
-      fallback?.speak(parts.join(" "));
-      return;
-    }
-
-    for (let i = 0; i < parts.length; i += 1) {
-      let bytes;
-      try {
-        bytes = await pending;
-      } catch (err) {
-        onTrouble?.(String(err.message ?? err));
-        break;
-      }
-      if (abandoned || !bytes) break;
-
-      // Start making the next one while this one is being heard.
-      pending = i + 1 < parts.length ? fetchSound(parts[i + 1]).catch(() => null) : null;
-      spoken.add(parts[i]);
-      try {
-        trace("speaking", parts[i].slice(0, 60));
-        await sound.say(bytes);
-      } catch (err) {
-        // The channel refused it. Say it some other way rather than appearing to
-        // talk while making no sound, which is the worst of both.
-        trace("could not play", err.message ?? err);
-        onTrouble?.("The phone wouldn't play that, so its own voice is reading it.");
-        speaking = false;
-        fallback?.speak(parts.slice(i).join(" "));
-        return;
-      }
-      if (abandoned) break;
-    }
-
-    speaking = false;
-    onFinish?.();
-  }
-
   return {
     unlock() {
       sound.wake();
       fallback?.unlock();
     },
+
+    // A fresh answer is a fresh chance for the good voice. Without this, one failure
+    // early in a drive would mean the plain voice for the rest of it.
+    startingAfresh() { usingFallback = false; ready.clear(); },
+
+    // Fetch the next one while this one plays, so the only wait in a long answer is
+    // before the first word.
+    prepare(sentence) {
+      if (usingFallback || ready.has(sentence)) return;
+      ready.set(sentence, fetchSound(sentence).catch(() => null));
+    },
+
+    // One sentence, and it settles when the sound genuinely stopped. Falling back to
+    // the phone's own voice is sticky for the rest of the answer: having failed once,
+    // trying again on every sentence would put a pause in front of each of them.
+    async sayOne(sentence) {
+      if (usingFallback) return fallback?.sayOne(sentence);
+
+      let bytes;
+      try {
+        const alreadyGoing = ready.get(sentence);
+        ready.delete(sentence);
+        bytes = await (alreadyGoing ?? fetchSound(sentence));
+        if (!bytes) throw new Error("the Mac sent nothing back");
+      } catch (err) {
+        // The good voice is unreachable. Better a rough voice than silence in a car.
+        trace("voice unreachable", err.message ?? err);
+        onTrouble?.(String(err.message ?? err));
+        usingFallback = true;
+        return fallback?.sayOne(sentence);
+      }
+
+      try {
+        trace("speaking", sentence.slice(0, 60));
+        await sound.say(bytes);
+      } catch (err) {
+        // The channel refused it. Say it some other way rather than appearing to talk
+        // while making no sound, which is the worst of both.
+        trace("could not play", err.message ?? err);
+        onTrouble?.("The phone wouldn't play that, so its own voice is reading it.");
+        usingFallback = true;
+        return fallback?.sayOne(sentence);
+      }
+    },
+
+    hush() {
+      sound.hush();
+      fallback?.hush();
+    },
+  };
+}
+
+
+// ------------------------------------------------------- one voice, one queue, one ear
+//
+// Everything this app says goes through here: the answer, "Thinking", every
+// confirmation, every error, every announcement. Nothing speaks around it.
+//
+// It exists because a car on speaker hears the app talking and treats it as somebody
+// asking a question. Three things caused that and this holds all three: requests used
+// to destroy each other instead of queueing, the end of sound was announced when a
+// loop unwound rather than when the noise stopped, and the check against its own voice
+// was switched off at exactly the moment its own voice came back — a beat late, off the
+// windscreen, after it believed it had finished.
+//
+// The mouth underneath owes this three things and nothing else: say one sentence, tell
+// me when the sound really stopped, and stop now if I say so. Any future voice that can
+// do those is covered by these rules rather than needing its own.
+function oneVoice({ mouth, settleMs = 900, allowanceFor, onStart, onFinish, now = () => Date.now() }) {
+  const waiting = [];
+  const said = recentlySpoken();
+  let running = false;
+  let cutOff = false;
+  let deafUntil = 0;
+
+  // How long a sentence could possibly take before we stop believing in it. Sound that
+  // never reports finishing must not leave it convinced it is still talking: that would
+  // make it deaf for the rest of the drive, which is worse than any echo. Being wrong
+  // this way costs a little echo; being wrong the other way costs the drive.
+  const allowance = allowanceFor ?? ((sentence) => 5_000 + sentence.length * 120);
+
+  function noLongerThan(promise, ms) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        trace("gave up waiting for the sound to end");
+        try { mouth.hush?.(); } catch {}
+        finish();
+      }, ms);
+      promise.then(finish, finish);
+    });
+  }
+
+  async function drain() {
+    if (running) return;
+    running = true;
+    cutOff = false;
+    mouth.startingAfresh?.();
+    onStart?.();
+    try {
+      while (waiting.length && !cutOff) {
+        const sentence = waiting.shift();
+        // Written down as it starts, because that is when it goes into the air, and it
+        // is the air we are trying to recognise later.
+        said.add(sentence);
+        if (waiting.length) mouth.prepare?.(waiting[0]);
+        await noLongerThan(Promise.resolve(mouth.sayOne(sentence)), allowance(sentence));
+        // Its own tail is still on its way back. Roll the deaf window forward after
+        // every sentence, so a long answer is covered all the way through and for a
+        // moment after the last word.
+        deafUntil = now() + settleMs;
+      }
+    } finally {
+      deafUntil = now() + settleMs;
+      waiting.length = 0;
+      cutOff = false;
+      running = false;
+      // Announced exactly once, whether it finished or was cut off. Announcing it twice
+      // is how a queued "Over to you." used to land in the middle of your sentence.
+      onFinish?.();
+    }
+  }
+
+  return {
+    unlock() { mouth.unlock?.(); },
+
+    // Asking to speak adds to the end. It does not destroy what is playing — that is a
+    // separate, deliberate act with its own name, below.
     speak(text) {
       const parts = intoSentences(text);
       if (!parts.length) return;
-      abandoned = false;
-      speaking = true;
-      onStart?.();
-      read(parts);
+      waiting.push(...parts);
+      drain();
     },
+
     silence() {
-      abandoned = true;
-      sound.hush();
-      fallback?.silence();
-      if (speaking) { speaking = false; onFinish?.(); }
+      cutOff = true;
+      waiting.length = 0;
+      try { mouth.hush?.(); } catch {}
     },
-    get busy() { return speaking || Boolean(fallback?.busy); },
-    get saying() { return [spoken.text, fallback?.saying ?? ""].join(" ").trim(); },
+
+    // Is there sound in the air right now.
+    get busy() { return running; },
+
+    // Not talking, but its own last words are still coming back. Anything arriving now
+    // is its tail rather than anybody's instruction.
+    get settling() { return !running && now() < deafUntil; },
+
+    // Everything recent enough to still be in the air.
+    get saying() { return said.text; },
+
+    forget() { said.clear(); deafUntil = 0; },
   };
 }
 
@@ -1192,13 +1299,19 @@ function splitFrontEnd() {
   const phoneVoice = deviceMouth({
     voiceName: setup.speaker === "mac" ? "" : setup.speakerVoice,
     rate: setup.speakerRate,
-    ...talking,
   });
 
-  const mouth =
-    setup.speaker === "mac"
-      ? macMouth({ fallback: phoneVoice, ...talking, onTrouble: (m) => log(m, "bad") })
-      : phoneVoice;
+  // The mouths know only how to make noise. Everything about turns, queueing, when the
+  // sound really stopped and how long to stay deaf afterwards lives in the one gate
+  // above them, so both voices — and anything we add later — obey the same rules.
+  const mouth = oneVoice({
+    mouth:
+      setup.speaker === "mac"
+        ? macMouth({ fallback: phoneVoice, onTrouble: (m) => log(m, "bad") })
+        : phoneVoice,
+    settleMs: setup.settleAfterSpeaking ?? 900,
+    ...talking,
+  });
 
   // One running transcript of everything you have said since the last question went
   // off. It is always being written to, it is always on the screen, and nothing
@@ -1981,11 +2094,20 @@ function splitFrontEnd() {
       return;
     }
 
-    // Its own voice off the windscreen is not part of your question. This is the
-    // only thing standing between always-listening and it writing down its own answer.
+    // Its own voice off the windscreen is not part of your question. This is the only
+    // thing standing between always-listening and it writing down its own answer.
     if (mouth?.busy) {
       if (soundsLikeItself(text, mouth.saying)) { trace("ignored (its own voice)", text); return; }
       mouth.silence();   // you talked over it, so it stops and listens
+    } else if (mouth?.settling && soundsLikeItself(text, mouth.saying, { whenNothingDistinctive: false })) {
+      // The sound has stopped but its last words are still on their way back. Dictation
+      // runs a beat behind the audio, so the end of its own sentence used to land here
+      // just after it believed it had finished — when nothing was checking at all — and
+      // was written down as the question. That is the fault this whole change exists
+      // for. Only its own words are refused, so a real question said the instant it
+      // stops is still heard.
+      trace("ignored (its own tail)", text);
+      return;
     }
 
     // A question it asked gets first refusal on what you said next. This is before
@@ -2100,7 +2222,13 @@ function splitFrontEnd() {
         // Talking over it has to stop it straight away rather than at the end of
         // your sentence, so this acts on words it has not finished hearing.
         onPartialPhrase: (text) => {
-          if (mouth?.busy && !soundsLikeItself(text, mouth.saying)) mouth.silence();
+          if (!mouth?.busy) return;
+          // One word is not evidence of anything. A single word is exactly what its own
+          // voice produces when it is misheard — and acting on that cut its own answer
+          // off mid-sentence for no reason anybody in the car could see. Somebody
+          // genuinely talking over it produces more than one word almost at once.
+          if (meaningfulWords(text).length < 2) return;
+          if (!soundsLikeItself(text, mouth.saying)) mouth.silence();
         },
         onTrouble: (message) => log(message, "bad"),
       });
