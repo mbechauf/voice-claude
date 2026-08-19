@@ -377,6 +377,21 @@ function recentlySpoken({ keep = 6, forMs = 12_000, now = () => Date.now() } = {
 }
 
 // Its own voice coming back is mostly its own words. Yours are not.
+// The one word that means "this is for you".
+//
+// Everything else about telling your voice from its own is a guess with a threshold on
+// it, and every threshold is wrong somewhere: too eager and its own answer is cut off
+// mid-sentence, too shy and you cannot interrupt at all. This has no threshold. It
+// either heard the word or it did not.
+//
+// It holds only because the app can never say the word itself, which is enforced where
+// sentences are made and tested, including when it quotes your own question back.
+const WAKE = "hey";
+
+function wantsAttention(heard) {
+  return String(heard).toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).includes(WAKE);
+}
+
 function meaningfulWords(text) {
   return text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
 }
@@ -405,6 +420,9 @@ function soundsLikeItself(heard, spoken, { whenNothingDistinctive = true } = {})
 // limit on how much a phone will say in one go.
 function intoSentences(text) {
   const clean = text
+    // Never spoken, whatever the answer contains — otherwise hearing itself would be
+    // an instruction, and the one unambiguous signal we have stops being unambiguous.
+    .replace(/\bhey\b/gi, " ")
     .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
     .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
     .replace(/\s+/g, " ")
@@ -2077,7 +2095,16 @@ function splitFrontEnd() {
     mouth?.speak(last ? `Taken out. It now ends. ${last.tidied ?? last.heard}` : "Taken out. Nothing left.");
   }
 
-  function heard(text) {
+  function heard(spokenAloud) {
+    // The word is how you get its attention, not part of what you are asking. It has
+    // done its job the moment it is recognised, so it never reaches the question — the
+    // same way you would not expect somebody's name to end up inside the sentence you
+    // said to them.
+    // Noticed before it is taken out, or taking it out would remove the very thing
+    // that was about to be acted on.
+    const addressed = wantsAttention(spokenAloud);
+    const text = spokenAloud.replace(/\bhey\b/gi, " ").replace(/\s+/g, " ").trim();
+    if (!text && !addressed) return;
     live = "";
     // Anything you say calls off an offer that has not been made yet — this is what
     // stops a sentence you were still adding to from being asked about.
@@ -2097,8 +2124,19 @@ function splitFrontEnd() {
     // Its own voice off the windscreen is not part of your question. This is the only
     // thing standing between always-listening and it writing down its own answer.
     if (mouth?.busy) {
-      if (soundsLikeItself(text, mouth.saying)) { trace("ignored (its own voice)", text); return; }
-      mouth.silence();   // you talked over it, so it stops and listens
+      // While it is talking, nothing gets in unless you addressed it. Comparing words to
+      // decide what was its own voice leaked both ways — its sentences landed in the
+      // question, and your short replies were eaten as echo. Nothing is left to guess:
+      // sound is in the air, so almost everything arriving is that sound coming back,
+      // and the one thing that certainly is not is a word this app can never say.
+      if (addressed) {
+        trace("stopping: heard the word", spokenAloud);
+        mouth.silence();
+        if (!text) return;   // nothing but the word: it has stopped, that was the point
+      } else {
+        trace("ignored (it was talking)", spokenAloud);
+        return;
+      }
     } else if (mouth?.settling && soundsLikeItself(text, mouth.saying, { whenNothingDistinctive: false })) {
       // The sound has stopped but its last words are still on their way back. Dictation
       // runs a beat behind the audio, so the end of its own sentence used to land here
@@ -2218,17 +2256,29 @@ function splitFrontEnd() {
 
       ears = deviceEars({
         onHeard: heard,
-        onHearing: (text) => { live = text; stopOffering(); show(); },
+        onHearing: (text) => {
+          // Not shown while it is talking, because it is not being kept either. Watching
+          // its own voice type itself across your screen looks exactly like the words
+          // going somewhere, and they are not — they are thrown away a moment later.
+          // Showing what is about to be discarded is its own kind of lie.
+          //
+          // The ear cannot simply be switched off instead: it has to stay open to hear
+          // the one word that stops it. So it listens and says nothing.
+          if (mouth?.busy && !wantsAttention(text)) return;
+          live = text;
+          stopOffering();
+          show();
+        },
         // Talking over it has to stop it straight away rather than at the end of
         // your sentence, so this acts on words it has not finished hearing.
         onPartialPhrase: (text) => {
-          if (!mouth?.busy) return;
-          // One word is not evidence of anything. A single word is exactly what its own
-          // voice produces when it is misheard — and acting on that cut its own answer
-          // off mid-sentence for no reason anybody in the car could see. Somebody
-          // genuinely talking over it produces more than one word almost at once.
-          if (meaningfulWords(text).length < 2) return;
-          if (!soundsLikeItself(text, mouth.saying)) mouth.silence();
+          // Acting on words it has not finished hearing is how it cut its own answer
+          // off. Its own voice arrives garbled, so a fragment of its own sentence looks
+          // like somebody new talking. The word is the only thing worth acting on early.
+          if (mouth?.busy && wantsAttention(text)) {
+            trace("stopping: heard the word", text);
+            mouth.silence();
+          }
         },
         onTrouble: (message) => log(message, "bad"),
       });
