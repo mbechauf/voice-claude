@@ -51,6 +51,10 @@ SOCKET = Path(os.environ.get("VOICE_CLAUDE_SESSION_SOCKET", "/tmp/voice-claude-s
 # costs a slow question and the thread that was in it, so the bias is towards keeping.
 # But "never" was the old value for both, and a drive that touched five projects ended
 # holding five conversations until somebody killed this process by hand.
+# How long a question will wait for the one before it on the same project, before
+# giving up and saying so rather than waiting for ever.
+WAIT_FOR_TURN_S = float(os.environ.get("VOICE_CLAUDE_WAIT_FOR_TURN", "180"))
+
 IDLE_LIMIT_S = float(os.environ.get("VOICE_CLAUDE_CONVERSATION_IDLE_S", 30 * 60))
 MOST_OPEN = int(os.environ.get("VOICE_CLAUDE_CONVERSATIONS_OPEN", 3))
 # How often to look. Frequent enough to matter, rare enough to be invisible.
@@ -80,6 +84,7 @@ class Sessions:
         self.open = {}          # project -> live client
         self.used = {}          # project -> when it was last spoken to
         self.answering = {}     # project -> how many questions are in flight on it
+        self.turns = {}         # project -> whose turn it is on that one conversation
 
     async def client_for(self, project, resume=None):
         self.used[project] = time.monotonic()
@@ -160,16 +165,33 @@ async def answer(sessions, writer, request):
     project = request["project"]
     client = await sessions.client_for(project, resume=request.get("resume"))
 
+    # One at a time, on this conversation.
+    #
+    # Two questions on the same project used to run at once and read from the one
+    # stream of replies between them, so the replies were split arbitrarily and neither
+    # question reliably saw the end of its own answer. Nothing ever finished, nothing
+    # ever timed out, and the app was left believing it was busy for good — five
+    # questions deep, with a beep every ten seconds and no way back short of killing
+    # this helper by hand. That is what this lock is for.
+    #
+    # The wait has a limit, because a wait without one is how the freeze happened in the
+    # first place. Giving up and saying so is always better than waiting silently: the
+    # person is in a car and cannot see that anything is wrong.
+    turn = sessions.turns.setdefault(project, asyncio.Lock())
+    try:
+        await asyncio.wait_for(turn.acquire(), timeout=WAIT_FOR_TURN_S)
+    except asyncio.TimeoutError:
+        tell(writer, "error", text="that project is still busy with the question before this one")
+        tell(writer, "done")
+        return
+
     # Counted while it is answering, so neither the idle limit nor the ceiling can
     # close this conversation out from under somebody who is waiting on it.
-    #
-    # This is a guard for the sweeps only. Two questions arriving on the same project
-    # at once still collide over the one reply stream — a separate fault, with its own
-    # issue, and deliberately not fixed here.
     sessions.answering[project] = sessions.answering.get(project, 0) + 1
     try:
         await run_the_question(sessions, writer, project, client, request)
     finally:
+        turn.release()
         left = sessions.answering.get(project, 1) - 1
         if left > 0:
             sessions.answering[project] = left

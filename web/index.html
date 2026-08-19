@@ -1185,6 +1185,10 @@ function splitFrontEnd() {
 
   // The phone's own voice is either the choice or the safety net, depending on what
   // the Mac says it is doing.
+  // When the voice was last bought back by a tap, so a second tap moments later can be
+  // read as checking rather than as an order to be quiet.
+  let soundCameBackAt = 0;
+
   const phoneVoice = deviceMouth({
     voiceName: setup.speaker === "mac" ? "" : setup.speakerVoice,
     rate: setup.speakerRate,
@@ -2147,8 +2151,22 @@ function splitFrontEnd() {
       // voice back rather than sending, which is the only thing it could be for.
       if (sound.refused) {
         sound.wake();
+        soundCameBackAt = Date.now();
         trace("tapped: asking for sound again");
         setState("listening — talk whenever you like");
+        // Said out loud on purpose. Getting the voice back is silent, so it looks
+        // exactly like the tap having done nothing — which is what makes somebody tap
+        // again, and the second tap used to mean shut up.
+        mouth?.speak("Sound's back.");
+        return;
+      }
+      // A tap arriving right after the one that bought the voice back is somebody
+      // asking "did that work?", not somebody asking for silence. Reading it as
+      // silence is what made the recovery look like a failure and cost a whole
+      // evening: tap, nothing, tap again, and now it is mute for a reason nobody in
+      // the car can see.
+      if (Date.now() - soundCameBackAt < (setup.tapAgainWithin ?? 4_000)) {
+        trace("tapped: still checking the sound came back");
         return;
       }
       if (mouth?.busy) { mouth.silence(); trace("tapped: quiet"); return; }
