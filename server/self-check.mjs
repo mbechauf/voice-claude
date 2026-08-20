@@ -4,6 +4,7 @@
 // does not have one at all.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -1006,6 +1007,134 @@ function checkTheScreenCanDrawIt() {
     briefing.children.some((kid) => kid.tag === "details") && text(briefing).includes("the standing briefing"));
 }
 
+// The red screen on the phone is where a drive fails before it has started, and it is
+// the one fault here nobody can work around at the wheel. So what the certificate
+// covers is checked rather than assumed, including the two ways the old one went wrong:
+// carrying no names at all, and going on claiming an address this Mac has since left.
+async function checkTheCertificate() {
+  const dir = path.join(root, ".voice-claude", "cert.check");
+  const scratch = (name) => path.join(dir, name);
+  // Loaded fresh each time, because the module holds on to what Tailscale told it —
+  // rightly, for a running app, and uselessly for a check that wants to try more than
+  // one tailnet in one process.
+  const loaded = async () => import(`./certificate.mjs?cert=${results.length}-${Math.random()}`);
+  const hostname = os.hostname().replace(/\.local$/, "");
+  const said = [];
+  const say = (line) => said.push(line);
+
+  const wipe = () => fs.rmSync(dir, { recursive: true, force: true });
+  const madeUpTailscale = (how) => {
+    fs.mkdirSync(dir, { recursive: true });
+    const at = scratch("tailscale-stub");
+    fs.writeFileSync(at, how, { mode: 0o755 });
+    return at;
+  };
+
+  wipe();
+  const { theCertificate, localAddresses } = await loaded();
+
+  // One it signs itself, which is what anybody without Tailscale gets.
+  const ours = theCertificate({ dir, say });
+  check(
+    "the certificate covers the name this Mac calls itself",
+    ours.covers.names.includes(hostname) && ours.covers.names.includes(`${hostname}.local`),
+    ours.covers.names.join(", "),
+  );
+  check(
+    "and every address it can be reached on",
+    localAddresses().every((address) => ours.covers.addresses.includes(address)),
+    ours.covers.addresses.join(", "),
+  );
+  check("and it says the phone will be warned about it", ours.warns === true && ours.kind === "ours");
+
+  // Signing a new one every start would throw away the acceptance tapped into the
+  // phone last time, which is the whole cost of a self-signed certificate.
+  const again = theCertificate({ dir, say });
+  check("a certificate that still fits is kept, not replaced", again.cert.equals(ours.cert));
+
+  // The address it was made for is gone. This is the state somebody was in for weeks:
+  // the file exists, so nothing was ever made again, and it covered a network the Mac
+  // had left. Being kept is exactly what was wrong with it.
+  execFileSync("openssl", [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", scratch("key.pem"), "-out", scratch("cert.pem"),
+    "-days", "825", "-subj", "/CN=voice-claude", "-addext", "subjectAltName=IP:127.0.0.1",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  const replaced = theCertificate({ dir, say });
+  check(
+    "one that no longer covers where this machine is gets signed again",
+    replaced.covers.names.includes(hostname),
+    said.at(-1),
+  );
+
+  // And one that has simply run out. Asked as of a date past its end rather than by
+  // waiting 825 days.
+  const renewed = theCertificate({ dir, say, now: Date.now() + 900 * 24 * 60 * 60 * 1000 });
+  check("an expired one is signed again too", !renewed.cert.equals(replaced.cert));
+
+  // A real certificate, from anywhere. Both halves or neither: half of a pair is
+  // somebody having set this up and it not having taken, which must not pass quietly.
+  process.env.VOICE_CLAUDE_CERT = scratch("cert.pem");
+  process.env.VOICE_CLAUDE_KEY = scratch("key.pem");
+  const yours = (await loaded()).theCertificate({ dir, say });
+  check("a certificate you supply is used as given", yours.kind === "yours" && yours.warns === false);
+
+  delete process.env.VOICE_CLAUDE_KEY;
+  said.length = 0;
+  const halfAPair = (await loaded()).theCertificate({ dir, say });
+  check(
+    "half of a supplied pair is said out loud rather than ignored",
+    halfAPair.kind === "ours" &&
+      said.some((line) => line.includes("VOICE_CLAUDE_CERT") && line.includes("VOICE_CLAUDE_KEY")),
+    said.join(" / "),
+  );
+  delete process.env.VOICE_CLAUDE_CERT;
+
+  // Tailscale, stood in for. What matters is not that the command runs but that its
+  // answer is used: the full name, with the trailing dot MagicDNS puts on it taken off.
+  wipe();
+  process.env.VOICE_CLAUDE_TAILSCALE = madeUpTailscale(`#!/bin/sh
+case "$1" in
+  status) echo '{"Self":{"DNSName":"mac.tailnet-example.ts.net."}}' ;;
+  cert) openssl req -x509 -newkey rsa:2048 -nodes -keyout "$5" -out "$3" -days 90 \\
+          -subj "/CN=$6" -addext "subjectAltName=DNS:$6" 2>/dev/null ;;
+esac
+`);
+  const real = (await loaded()).theCertificate({ dir, say });
+  check(
+    "a Tailscale certificate is taken for the full name, and warns about nothing",
+    real.kind === "tailnet" && real.covers.names.includes("mac.tailnet-example.ts.net") && !real.warns,
+    real.covers?.names.join(", "),
+  );
+
+  // The common way that fails is HTTPS never having been switched on for the tailnet,
+  // which is a setting in a web console and not something this end can fix. Falling
+  // back is right; falling back silently, or falling back to a certificate that leaves
+  // the Tailscale name out, is how the warning became permanent.
+  wipe();
+  said.length = 0;
+  process.env.VOICE_CLAUDE_TAILSCALE = madeUpTailscale(`#!/bin/sh
+case "$1" in
+  status) echo '{"Self":{"DNSName":"mac.tailnet-example.ts.net."}}' ;;
+  cert) echo "HTTPS is not enabled in the admin panel" >&2; exit 1 ;;
+esac
+`);
+  const refused = (await loaded()).theCertificate({ dir, say });
+  check(
+    "a tailnet without HTTPS is told what to switch on",
+    said.some((line) => /HTTPS/.test(line) && /admin console/.test(line)),
+    said.join(" / "),
+  );
+  check(
+    "and the certificate it falls back to still covers the Tailscale name",
+    refused.kind === "ours" && refused.covers.names.includes("mac.tailnet-example.ts.net"),
+    refused.covers?.names.join(", "),
+  );
+
+  delete process.env.VOICE_CLAUDE_TAILSCALE;
+  wipe();
+}
+
 async function bannerSays(words, patience = 15_000) {
   const until = Date.now() + patience;
   while (Date.now() < until) {
@@ -1137,6 +1266,7 @@ try {
     `${setup.readOutPage} at a time, ${spoken.length} commands`,
   );
 
+  await checkTheCertificate();
   await checkItOnlyEndsItsOwn();
   checkConversationsAreLetGoOf();
   checkItKnowsItsOwnVoice();

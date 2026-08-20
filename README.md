@@ -74,8 +74,10 @@ through a channel a tap opened, and reloading closes it.
 alongside the voice itself. If the voice is missing when the server starts, it says so and falls
 back to the phone's own rather than leaving you with silence in a car.
 
-Open the printed address on the phone and press Start. The certificate is one this Mac signs itself,
-so Safari warns the first time; accept it and it stays accepted.
+Open the printed address on the phone and press Start. It prints the full Tailscale name first when
+this Mac is on a tailnet, because that is the address that survives changing network. Whether the
+phone warns about the certificate, and what to do about it, is under "Reaching the Mac from the
+road".
 
 Then talk. Everything you say builds up in one box on the screen, in full, and stays there. Six
 things you can say are instructions rather than part of the question:
@@ -334,6 +336,40 @@ The phone does not have to be on the same wifi. Any private network of your own 
 Mac works, and the server prints every address it can be reached on, including those. Do not expose
 the page to the public internet: it has no password, and anyone who found it could read your code
 through Claude.
+
+### The certificate, and the warning that kept coming back
+
+A phone will not give a web page the microphone over a plain connection, so this is HTTPS whichever
+way you reach it. Three ways it gets a certificate, tried in that order, and it says on startup which
+one you got:
+
+1. **One you supply.** Set `VOICE_CLAUDE_CERT` and `VOICE_CLAUDE_KEY` to a certificate and its key.
+   Both, or neither: half a pair is somebody having set this up and it not having taken, so it says
+   so rather than quietly ignoring you.
+2. **Tailscale's.** If this Mac is on a tailnet, it asks Tailscale for a real certificate for the
+   machine's full MagicDNS name—`your-mac.your-tailnet.ts.net`—and serves that. Then the phone never
+   warns at all, which is worth more than tidiness: Safari is meaningfully less willing to hand over
+   the microphone on a connection it has been told to distrust. It needs HTTPS switched on for your
+   tailnet, in the admin console under Settings → Features; until it is, Tailscale refuses and the
+   startup says exactly that. Nothing is asked of the network on later starts—the certificate is kept
+   and only renewed inside its last week.
+3. **Its own.** Failing both, it signs one covering every name and address this machine currently
+   answers to: `localhost`, the Mac's own name, `name.local`, the Tailscale name if there is one, and
+   each IP address. Safari warns once. Accept it and it stays accepted.
+
+Two things had made that warning permanent rather than once. The old certificate carried **no names
+at all**, only addresses, so opening it by any name—the Tailscale one included—failed the name check,
+which Safari treats far more harshly than an issuer it merely does not recognise. And it was written
+once and then kept forever, so a new wifi network, or a Tailscale that came up after it was made,
+left it claiming an address this Mac had since left. Both are fixed by the same rule: anything less
+than a complete match with where this machine actually is now gets thrown away and signed again.
+
+Two things worth knowing when it is a real certificate. Use the **full** name—the short one is not
+what MagicDNS resolves and not what any certificate is ever issued for. And opening it by IP address
+still warns, always: no public certificate authority will put an IP in a certificate, so the address
+lines are there for a phone that cannot resolve the name, not as an equal choice.
+
+Why it works this way: `doc/a-certificate-the-phone-believes.md`.
 
 ## What it is allowed to do
 

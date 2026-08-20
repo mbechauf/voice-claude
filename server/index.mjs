@@ -7,8 +7,6 @@ import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
-import { networkInterfaces } from "node:os";
 
 import {
   ANSWERS,
@@ -43,6 +41,7 @@ import {
   whatIsRunning,
   WITH_THE_APP,
 } from "./running.mjs";
+import { localAddresses, tailnetName, theCertificate } from "./certificate.mjs";
 import { since } from "./watching.mjs";
 import { isInstalled as macVoiceInstalled, speak, warmUp } from "./speech.mjs";
 import {
@@ -741,46 +740,19 @@ async function handle(req, res) {
 
 // ------------------------------------------------- certificate (for the mic)
 
-// Phones will not give a web page the microphone unless the connection is secure,
-// so we serve over HTTPS with a certificate this machine signs itself. Safari will
-// warn once on the phone; accept it and it stays accepted.
-function ensureCertificate() {
-  const dir = path.join(root, ".cert");
-  const keyPath = path.join(dir, "key.pem");
-  const certPath = path.join(dir, "cert.pem");
-
-  if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
-    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
-  }
-
-  fs.mkdirSync(dir, { recursive: true });
-  const addresses = localAddresses();
-  const alt = ["IP:127.0.0.1", "DNS:localhost", ...addresses.map((a) => `IP:${a}`)].join(",");
-
-  execFileSync("openssl", [
-    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-    "-keyout", keyPath, "-out", certPath,
-    "-days", "825", "-subj", "/CN=voice-claude",
-    "-addext", `subjectAltName=${alt}`,
-  ]);
-
-  console.log("Made a self-signed certificate for this machine.");
-  return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
-}
-
-function localAddresses() {
-  const out = [];
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.family === "IPv4" && !entry.internal) out.push(entry.address);
-    }
-  }
-  return out;
-}
+// Phones will not give a web page the microphone unless the connection is secure, so
+// we serve over HTTPS. Which certificate that is — a real one Tailscale issued, or one
+// this machine signs for itself — is decided next door, along with the reason. All that
+// matters here is that it covers every name and address this Mac answers to, because
+// the one it is opened by is not this end's choice to make.
+//
+// What it has to say is kept rather than printed, so it lands with the rest of the
+// banner instead of ahead of the line that says what this even is.
+const aboutTheCertificate = [];
+const creds = theCertificate({ dir: path.join(root, ".cert"), say: (line) => aboutTheCertificate.push(line) });
 
 // ------------------------------------------------------------------- listen
 
-const creds = ensureCertificate();
 const secureServer = https.createServer(creds, (req, res) => {
   handle(req, res).catch((err) => {
     console.error(err);
@@ -838,11 +810,32 @@ server.listen(PORT, () => {
     if (speaker === "mac") warmUp();
     warmUpTidyUp();
   }
+  for (const line of aboutTheCertificate) console.log(line);
+
+  // The full Tailscale name goes first when there is one, and not out of neatness: it
+  // is the only address here that survives changing network, and — when the
+  // certificate came from Tailscale — the only one the phone accepts without a word.
+  // An IP address is never in a real certificate and never can be, so offering both
+  // with nothing to choose between them is how somebody ends up on the warning again.
+  const full = tailnetName();
   console.log(`\nOpen this on the phone:`);
-  for (const address of localAddresses()) console.log(`   https://${address}:${PORT}`);
+  if (full) console.log(`   https://${full}:${PORT}${creds.warns ? "" : "   ← no warning"}`);
+  for (const address of localAddresses()) {
+    console.log(`   https://${address}:${PORT}${full && !creds.warns ? "   (warns — the certificate is for the name)" : ""}`);
+  }
   // Said here rather than linked from the driving page, because the driving page is
   // used by somebody who cannot look at it, and a link nobody can press is clutter.
   console.log(`\nTo watch the work on a screen, add /watching to that address.`);
-  console.log(`\nSafari will warn about the certificate the first time. Accept it.\n`);
+  if (creds.warns) {
+    console.log(`\nSafari will warn about the certificate the first time. Accept it.`);
+    // Only said to somebody who is being warned, and only once there is a tailnet to
+    // say it about: it is the whole of the fix, and it is a switch in a web console
+    // rather than anything to change here.
+    if (full) {
+      console.log(`To stop it for good: switch HTTPS on for your tailnet in the admin`);
+      console.log(`console, then start this again — it fetches a real certificate itself.`);
+    }
+  }
+  console.log("");
   watchOwnCode();
 });
