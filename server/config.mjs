@@ -158,13 +158,13 @@ export const PHRASES = {
   // "read the prompt" is deliberately absent: "can it read the prompt file" is a
   // real question about this project, and a wording that can appear inside a
   // question is worse than one fewer way of saying it.
-  read: ["read prompt", "read it back", "read that back", "read back", "say it back", "rep prompt"],
+  read: ["read prompt", "read it back", "read that back", "read this back", "read back", "say it back", "rep prompt"],
 
   // Drop the last thing said, keep the rest.
-  undo: ["take that back", "delete last", "delete the last", "scratch last"],
+  undo: ["take that back", "take this back", "delete last", "delete the last", "scratch last"],
 
   // Throw the whole question away and start it again.
-  wipe: ["scratch that", "start again", "wipe that"],
+  wipe: ["scratch that", "scratch this", "start again", "wipe that", "wipe this"],
 
   // Forget the whole drive, not just this question.
   forget: ["fresh start", "forget everything"],
@@ -203,6 +203,12 @@ export const PHRASES = {
   // it never goes to Claude, because the one moment you cannot remember a command is
   // the worst moment to wait a minute for an answer.
   help: ["what can i say", "help me out", "say the commands"],
+
+  // Stop listening altogether, and start again. A car is full of talk that was never
+  // meant for the machine — a passenger, a phone call, a podcast — and until now the
+  // only way to keep it out was to stop the whole session.
+  pause: ["pause", "hold on"],
+  resume: ["unpause", "listen again"],
 };
 
 // What each one does, in the words it should be said aloud in.
@@ -216,6 +222,8 @@ export const WHAT_EACH_DOES = {
   send: "send what you have said so far",
   read: "hear back what you have said so far",
   undo: "drop just the last thing you said",
+  pause: "stop listening until you say unpause",
+  resume: "start listening again",
   wipe: "throw the whole question away and start it again",
   forget: "forget the whole drive, not just this question",
   help: "this list",

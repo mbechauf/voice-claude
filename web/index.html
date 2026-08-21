@@ -56,6 +56,9 @@
   .you { color: #8fc7a8; }
   .work { color: #9b968a; font-style: italic; }
   .bad { color: #e08a6a; }
+  /* Held off. Deliberately unlike every other state — dimmed and still, so a glance
+     tells you it is ignoring you on purpose rather than having quietly died. */
+  button.paused { background: #2a2d33; color: #8b9098; border-color: #3a3f47; }
 </style>
 </head>
 <body>
@@ -387,9 +390,21 @@ function recentlySpoken({ keep = 6, forMs = 12_000, now = () => Date.now() } = {
 // It holds only because the app can never say the word itself, which is enforced where
 // sentences are made and tested, including when it quotes your own question back.
 const WAKE = "hey";
+// The spellings dictation actually produces for it. Matching by sound was tried first
+// and was far too loose — "how" collided with it, so "how do i start the server" quietly
+// lost its first word. A short list of real spellings is exact, and every one of them is
+// a word nobody says by accident in a sentence about code.
+const SOUNDS_LIKE_WAKE = new Set(["hey", "hay", "hei", "heh"]);
 
 function wantsAttention(heard) {
-  return String(heard).toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).includes(WAKE);
+  // Matched by sound, not by spelling. Dictation writes "hay" about as often as "hey",
+  // and they are the same word said out loud — an exact match failed silently every
+  // time it guessed the other one, which looks exactly like the app ignoring you.
+  return String(heard)
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .split(/\s+/)
+    .some((word) => SOUNDS_LIKE_WAKE.has(word));
 }
 
 function meaningfulWords(text) {
@@ -423,6 +438,11 @@ function intoSentences(text) {
     // Never spoken, whatever the answer contains — otherwise hearing itself would be
     // an instruction, and the one unambiguous signal we have stops being unambiguous.
     .replace(/\bhey\b/gi, " ")
+    // A web address read out loud is a string of letters, dots and slashes that nobody
+    // can hold in their head, let alone write down at seventy miles an hour. It is on
+    // the screen in full either way, so this says that it is there and stops.
+    .replace(/\bhttps?:\/\/\S+/gi, " the link on screen ")
+    .replace(/\b(?:www\.)[^\s]+/gi, " the link on screen ")
     .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
     .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
     .replace(/\s+/g, " ")
@@ -979,7 +999,12 @@ const POLITENESS = new Set([
   "no", "yes", "yeah", "to", "still", "wanted", "gonna", "going", "try", "trying",
 ]);
 
-function makePhraseReader(phrases) {
+// `wake` is spelled out here rather than reached for, so this can be lifted out and
+// exercised on its own — which is how it is tested. The two spellings are checked
+// against each other, because a silent disagreement would mean commands that never fire.
+function makePhraseReader(phrases, { wake = ["hey", "hay", "hei", "heh"], alwaysAllowed = ["send"] } = {}) {
+  const addressedWith = new Set(Array.isArray(wake) ? wake : [wake]);
+  const saidToUs = (word) => addressedWith.has(word);
   // Each command may have several wordings; any of them means the same thing.
   // Longest first, so that when one wording begins like another the longer reading
   // wins rather than the shorter one swallowing its first words.
@@ -1022,6 +1047,34 @@ function makePhraseReader(phrases) {
         // This is worth more than any amount of cleverness about which words to
         // listen for, because it does not depend on the words at all — as long as
         // "the start" means what a person means by it, politeness included.
+        // You have to address the machine before instructing it. Nothing counts as an
+        // instruction unless the word comes first, with nothing but politeness between.
+        //
+        // This replaces a judgement with a fact. Everything before rested on deciding
+        // whether words were meant for the machine, and no rule about where they sat in
+        // a sentence got it right: "can you read the commands to me" read them out, and
+        // the app's own "over to you" sent the question for you. Being addressed is not
+        // a better guess — it removes the guess.
+        //
+        // A missed word is harmless on purpose: the instruction simply stays part of the
+        // question. Failing towards nothing-happened is right; the other way does
+        // something nobody asked for.
+        let spokeToUsAt = -1;
+        for (let k = i - 1; k >= 0; k -= 1) {
+          const word = pending[k];
+          if (saidToUs(word)) {
+            spokeToUsAt = k;
+            break;
+          }
+          if (!POLITENESS.has(word)) break;
+        }
+        const addressed = spokeToUsAt >= 0;
+
+        // Sending is the one exception, because it is said several times a minute and
+        // having to address it every time would be the difference between this being
+        // usable and not. It is safe to exempt only because the app is now deaf while it
+        // is talking — its own "over to you" cannot get back in.
+        const saidConstantly = alwaysAllowed.includes(found?.name);
         const onlyPolitenessBefore = pending.slice(0, i).every((word) => POLITENESS.has(word));
         const atAnEdge = onlyPolitenessBefore || i + found?.words.length === pending.length;
 
@@ -1036,13 +1089,18 @@ function makePhraseReader(phrases) {
         // "can you", then "ok so could you please", then "no I want to". Each fix
         // was a longer list, which is not a fix. This removes the guess for the one
         // command where something better is available.
-        const carriesItsOwnProof = found?.name === "project";
-        const said = found && (atAnEdge || carriesItsOwnProof) ? found : null;
+        const said = found && (addressed || (saidConstantly && atAnEdge)) ? found : null;
 
         if (said) {
-          // The politeness in front of an instruction was never part of a question,
-          // so it goes with the instruction rather than into what Claude is asked.
-          if (onlyPolitenessBefore) spoken = [];
+          // The word, and the politeness around it, were never part of a question. They
+          // go with the instruction rather than into what Claude is asked — otherwise
+          // every instruction would leave a stray "hey" behind in the question.
+          // Everything from the word onwards goes with the instruction rather than into
+          // the question — the politeness in between included, since "hey could you
+          // please" was never part of what you were asking. The word itself is already
+          // gone by here, hence the one less.
+          if (addressed) spoken = spoken.slice(0, spoken.length - (i - spokeToUsAt - 1));
+          else if (onlyPolitenessBefore) spoken = [];
           flush();
           // It reports the words it swallowed, so a command that turns out not to
           // have been one can be put back into the question exactly as spoken.
@@ -1053,6 +1111,26 @@ function makePhraseReader(phrases) {
         // The rest of a phrase may still be on its way, so hold these back rather
         // than letting them fall through into the question.
         if (commands.some((c) => mightBecome(pending, i, c.words))) break;
+
+        // The word that gets our attention never becomes part of the question, and it
+        // has to survive the gap between one breath and the next: said at the end of a
+        // piece of speech, with the instruction arriving in the following one, it used
+        // to be flushed out on its own and leave the instruction unaddressed a moment
+        // later — so the instruction quietly did nothing.
+        //
+        // So it is held while the words after it could still become an instruction, and
+        // simply dropped once they plainly cannot. Dropped rather than passed on: it was
+        // addressed to the app either way, and it was never part of the question.
+        const word = pending[i];
+        if (saidToUs(word)) {
+          const roomLeft = pending.length - (i + 1);
+          const couldStillBeOne =
+            roomLeft < commands[0].words.length &&
+            (roomLeft === 0 || commands.some((c) => mightBecome(pending, i + 1, c.words)));
+          if (couldStillBeOne) break;
+          i += 1;
+          continue;
+        }
 
         spoken.push(pending[i]);
         i += 1;
@@ -1449,6 +1527,11 @@ function splitFrontEnd() {
   let offerTimer = null;
   let declined = 0;      // asked and told no, on the question as it stands
 
+  // When words last arrived, so an offer can insist on real silence rather than on a
+  // timer that started before you had finished the sentence.
+  let lastHeardAt = 0;
+  let offering = false;
+
   function stopOffering() {
     if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
   }
@@ -1509,12 +1592,23 @@ function splitFrontEnd() {
       // Talking underneath its own voice is the one thing that makes an offer worse
       // than useless, so it waits for quiet rather than cutting in.
       if (mouth?.busy) { offerTimer = setTimeout(offer, 500); return; }
+      // Silence means silence: no words in the air, and none arriving. Dictation reports
+      // a settled piece a beat after you stop, so an offer timed from the last settled
+      // piece could land while you were plainly still in mid-sentence — and then, being
+      // its own voice, it made everything deaf and swallowed the rest of what you said.
+      const quietFor = Date.now() - lastHeardAt;
+      const needed = setup.quietBeforeOffering ?? 1_200;
+      if (quietFor < needed) { offerTimer = setTimeout(offer, needed - quietFor); return; }
       trace("OFFERING TO SEND", asTidied());
+      offering = true;
       askYesNo("Send that?", send, () => {
         declined += 1;
         trace("offer declined", `${declined}`);
         sound.note("declined");
       });
+      // Two words of its own, and only for a moment. Long enough that carrying on
+      // talking cancels it, short enough that it cannot be mistaken for an answer.
+      setTimeout(() => { offering = false; }, setup.offerStaysOpen ?? 4_000);
     };
 
     // The clock starts on the words alone, so nothing waits on the Mac to answer. The
@@ -1550,7 +1644,14 @@ function splitFrontEnd() {
   }
 
   function paint() {
-    if (mouth?.busy) { goBtn.textContent = "Quiet"; goBtn.className = "talking"; }
+    // Being held off has to be obvious at a glance. Nothing arriving looks exactly like
+    // dictation having died, and the difference between "it is ignoring you on purpose"
+    // and "it is broken" is not something anybody should have to work out while driving.
+    if (heldOff) { goBtn.textContent = "Paused"; goBtn.className = "paused"; }
+    // Says what tapping does, rather than what it thinks it is. "Quiet" read as a
+    // status — as in it has gone quiet — which is the opposite of the truth at that
+    // moment, so you tapped expecting to wake it and silenced it instead.
+    else if (mouth?.busy) { goBtn.textContent = "Stop talking"; goBtn.className = "talking"; }
     else if (question.length) { goBtn.textContent = "Send"; goBtn.className = "open"; }
     else { goBtn.textContent = "Listening"; goBtn.className = "live"; }
   }
@@ -1651,6 +1752,32 @@ function splitFrontEnd() {
     if (command === "project") { awaitingProject = spokenAs; return; }
     if (command === "help") return sayWhatYouCanSay();
     if (command === "remote") return handToRemoteControl();
+    if (command === "pause") return holdOff();
+    if (command === "resume") return listenAgain();
+  }
+
+  // Held off: it keeps listening, because it has to hear the one thing that brings it
+  // back, but nothing else gets through — not into the question, not onto the screen,
+  // not to a command. For a car full of talk that was never meant for it, this is the
+  // only honest answer: no amount of cleverness tells a passenger from you.
+  let heldOff = false;
+
+  function holdOff() {
+    heldOff = true;
+    stopWaitingNote();
+    trace("holding off");
+    setState("paused — say “hey unpause” to come back");
+    paint();
+    mouth?.speak("Not listening. Say unpause when you want me back.");
+  }
+
+  function listenAgain() {
+    heldOff = false;
+    trace("listening again");
+    waitingForYou();
+    mouth?.speak("Listening again.");
+    idleState();
+    paint();
   }
 
   // --------------------------------------------- questions the phone itself asks
@@ -2020,7 +2147,9 @@ function splitFrontEnd() {
   function keepTicking() {
     stopTicking();
     tick = setInterval(() => {
-      if (!mouth?.busy) sound.note("working");
+      // No note while it works. It was meant to say "still here" during a long wait, but
+      // a beep every ten seconds for two minutes is not reassurance, it is nagging — and
+      // it says nothing you cannot see on the screen or hear when the answer arrives.
       // On the clock as well as on events, or a single slow step would swallow
       // everything that led up to it and say none of it until the next thing happened.
       sayWhereItIsUpTo();
@@ -2041,6 +2170,10 @@ function splitFrontEnd() {
   function waitingForYou() {
     clearInterval(waitingTick);
     waitingTick = setInterval(() => {
+      // Guarded here as well as stopped on the way in, because anything that settles the
+      // screen starts this clock again — so stopping it once was not enough and the note
+      // came back a few seconds after being paused.
+      if (heldOff) return;
       if (working || waitingOn || mouth?.busy) return;
       if (question.length || live || reader.held()) return;
       sound.note("waiting");
@@ -2103,7 +2236,22 @@ function splitFrontEnd() {
     // Noticed before it is taken out, or taking it out would remove the very thing
     // that was about to be acted on.
     const addressed = wantsAttention(spokenAloud);
-    const text = spokenAloud.replace(/\bhey\b/gi, " ").replace(/\s+/g, " ").trim();
+    lastHeardAt = Date.now();
+
+    // Held off. Everything is dropped except the one instruction that brings it back,
+    // which still has to be addressed like any other — so a passenger saying "carry on"
+    // to somebody else cannot wake it.
+    if (heldOff) {
+      const backAgain = addressed &&
+        readAsInstructions(spokenAloud, setup.phrases).some((step) => step.command === "resume");
+      if (!backAgain) { trace("ignored (holding off)", spokenAloud); return; }
+      listenAgain();
+      return;
+    }
+    // Left in on purpose now: the part that recognises instructions needs to see it,
+    // because an instruction only counts when you addressed the machine first. It is
+    // taken out there instead, so it never reaches the question either way.
+    const text = spokenAloud;
     if (!text && !addressed) return;
     live = "";
     // Anything you say calls off an offer that has not been made yet — this is what
@@ -2123,7 +2271,16 @@ function splitFrontEnd() {
 
     // Its own voice off the windscreen is not part of your question. This is the only
     // thing standing between always-listening and it writing down its own answer.
-    if (mouth?.busy) {
+    // An offer to send is the one thing this app says that you are expected to talk
+    // straight through. It asks while you are drawing breath, so treating your next
+    // words as its own echo — which is what being deaf while talking does — threw away
+    // the rest of the sentence you were plainly still saying.
+    if (mouth?.busy && offering && !soundsLikeItself(text, mouth.saying)) {
+      trace("carried on talking through the offer", text);
+      stopOffering();
+      offering = false;
+      mouth.silence();
+    } else if (mouth?.busy) {
       // While it is talking, nothing gets in unless you addressed it. Comparing words to
       // decide what was its own voice leaked both ways — its sentences landed in the
       // question, and your short replies were eaten as echo. Nothing is left to guess:
@@ -2264,8 +2421,10 @@ function splitFrontEnd() {
           //
           // The ear cannot simply be switched off instead: it has to stay open to hear
           // the one word that stops it. So it listens and says nothing.
+          if (heldOff) return;   // held off means shown nothing, not just kept nothing
           if (mouth?.busy && !wantsAttention(text)) return;
           live = text;
+          lastHeardAt = Date.now();   // half-heard words are still you, still talking
           stopOffering();
           show();
         },
@@ -2356,6 +2515,15 @@ function splitFrontEnd() {
     say(text) {
       trace("announcing", text);
       log(text, "work");
+      // Not attempted before the phone has been touched. A phone never lets a page make
+      // sound until somebody taps it, so this always failed on a fresh load — and the
+      // failure printed a message about the phone refusing to play, which reads like
+      // something being broken and sent us hunting a certificate that was fine.
+      // Nothing is wrong here; the tap simply has not happened yet, so say that instead.
+      if (sound.refused) {
+        setState("tap once to give it a voice");
+        return;
+      }
       mouth?.speak(text);
     },
   };

@@ -149,7 +149,9 @@
     <footer>
       <div class="queued" id="queued" hidden></div>
       <div class="row">
-        <textarea id="typed" rows="1" placeholder="Type a question — nothing will be read out loud"></textarea>
+        <textarea id="typed" rows="1" name="question" inputmode="text" enterkeyhint="send"
+          autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
+          placeholder="Type a question — nothing will be read out loud"></textarea>
         <button id="send" type="button">Ask</button>
       </div>
     </footer>
