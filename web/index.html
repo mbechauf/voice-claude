@@ -443,6 +443,24 @@ function intoSentences(text) {
     // the screen in full either way, so this says that it is there and stops.
     .replace(/\bhttps?:\/\/\S+/gi, " the link on screen ")
     .replace(/\b(?:www\.)[^\s]+/gi, " the link on screen ")
+    // A file name is the one piece of machinery that has to survive being spoken —
+    // somebody has to be able to repeat it out loud to something else. Written out for
+    // the voice here rather than in the answer itself, because doing it in the answer
+    // ruined the screen: the one place it could be read literally showed the spelled
+    // version too, which is unreadable and cannot be copied.
+    //
+    // Only things that are plainly a name: something with a slash in it, or something
+    // ending in a kind of file. A looser rule read ordinary full stops and decimal
+    // points out loud as the word "dot", which is worse than not helping at all.
+    .replace(
+      /(?:\S*\/\S+|\b[\w.-]+\.(?:md|mjs|js|py|json|html|css|txt|yml|yaml|sh|jsonl|log))\b/g,
+      (name) =>
+        ` ${name
+          .replace(/\//g, " slash ")
+          .replace(/\./g, " dot ")
+          .replace(/-/g, " dash ")
+          .replace(/_/g, " underscore ")} `,
+    )
     .replace(/```[\s\S]*?```/g, " ")   // spoken code is noise, whatever it says
     .replace(/[*_`#>]/g, " ")          // stray markdown is read out as symbols
     .replace(/\s+/g, " ")
@@ -1716,6 +1734,13 @@ function splitFrontEnd() {
     workStartedAt = Date.now();
     keepTicking();
     setState("thinking…");
+    // Whatever was still to be said about the last question is dropped. An answer that
+    // took a while can land a second after you have already moved on, and hearing the
+    // reply to your previous question read out after your latest one is worse than
+    // silence: it sounds like the app reciting something old, and there is no way from
+    // the driver's seat to tell which question you are hearing about. Asking something
+    // new is as clear a statement as there is that you are done with the last one.
+    mouth?.silence();
     // The sound alone says "gone", and on a road with the windows down it is easy to
     // half-hear or miss. A word says the same thing in a way that cannot be mistaken
     // for a road noise, and it is one word so it is out of the way before the answer
