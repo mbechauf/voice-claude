@@ -101,13 +101,19 @@
          using. */
       footer {
         position: fixed;
-        left: 0; right: 0; bottom: 0;
-        padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+        left: 0; right: 0;
+        bottom: max(env(keyboard-inset-height, 0px), var(--covered, 0px));
+        padding: 10px 16px calc(18px + env(safe-area-inset-bottom));
         background: rgba(20, 22, 26, 0.96);
         backdrop-filter: blur(8px);
         border-top: 1px solid var(--rule);
       }
       footer .row { display: flex; gap: 8px; align-items: flex-end; }
+      /* Room under the conversation for the box that floats over it, so the newest
+         line is never hidden behind the thing you are about to type into. */
+      main {
+        padding-bottom: calc(var(--room-for-the-box, 76px) + var(--covered, 0px) + 16px);
+      }
       footer textarea {
         flex: 1;
         resize: none;
@@ -157,6 +163,29 @@
     </footer>
 
     <script>
+    // iPads do not all report the keyboard through the styling above, and the browser
+    // is the only thing that knows how much of the window is genuinely visible once it
+    // is up. So the footer is told, in the one case the styling cannot cover.
+    if (window.visualViewport) {
+      const footerSitsAbove = () => {
+        const hidden = window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop;
+        document.documentElement.style.setProperty("--covered", `${Math.max(0, hidden)}px`);
+        // The conversation has to end where the box begins. A fixed gap underneath was
+        // wrong the moment the box moved: the box floats, so anything not accounted for
+        // is simply hidden behind it — and what is hidden is always the newest line,
+        // which is the one you were reading.
+        const box = document.querySelector("footer");
+        if (box) document.documentElement.style.setProperty("--room-for-the-box", `${box.offsetHeight}px`);
+      };
+      window.visualViewport.addEventListener("resize", footerSitsAbove);
+      window.visualViewport.addEventListener("scroll", footerSitsAbove);
+      window.addEventListener("resize", footerSitsAbove);
+      footerSitsAbove();
+      // The box grows as a question gets longer, so the room beneath it is measured
+      // again whenever it does rather than only when the keyboard moves.
+      new ResizeObserver(footerSitsAbove).observe(document.querySelector("footer"));
+    }
+
       const stream = document.getElementById("stream");
       const chooser = document.getElementById("project");
       const pulse = document.getElementById("pulse");

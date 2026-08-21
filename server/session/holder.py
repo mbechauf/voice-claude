@@ -55,6 +55,19 @@ SOCKET = Path(os.environ.get("VOICE_CLAUDE_SESSION_SOCKET", "/tmp/voice-claude-s
 # giving up and saying so rather than waiting for ever.
 WAIT_FOR_TURN_S = float(os.environ.get("VOICE_CLAUDE_WAIT_FOR_TURN", "180"))
 
+# How full a conversation is allowed to get before it is rebuilt on purpose.
+#
+# It will be rebuilt either way — when it runs out of room, whatever is happening at the
+# time. This conversation's own record shows four of those, one dropping it from four
+# hundred thousand to thirteen thousand, none of them announced. Landing mid-question,
+# that reads exactly like the thing losing the thread, and the person it happens to is
+# driving and cannot look.
+#
+# So it is done early, at a moment nobody is waiting, while there is still room to write
+# a proper summary rather than one made by something already struggling. Sixty per cent
+# is late enough to be rare and early enough to be done well.
+FULL_ENOUGH = float(os.environ.get("VOICE_CLAUDE_REBUILD_AT", "0.6"))
+
 IDLE_LIMIT_S = float(os.environ.get("VOICE_CLAUDE_CONVERSATION_IDLE_S", 30 * 60))
 MOST_OPEN = int(os.environ.get("VOICE_CLAUDE_CONVERSATIONS_OPEN", 3))
 # How often to look. Frequent enough to matter, rare enough to be invisible.
@@ -85,6 +98,7 @@ class Sessions:
         self.used = {}          # project -> when it was last spoken to
         self.answering = {}     # project -> how many questions are in flight on it
         self.turns = {}         # project -> whose turn it is on that one conversation
+        self.carrying_on = {}   # project -> what a rebuilt conversation must read first
 
     async def client_for(self, project, resume=None):
         self.used[project] = time.monotonic()
@@ -163,7 +177,29 @@ class Sessions:
 async def answer(sessions, writer, request):
     """Put one question to a project's session and report everything that comes back."""
     project = request["project"]
-    client = await sessions.client_for(project, resume=request.get("resume"))
+    # A conversation that was rebuilt does not resume: resuming is what we were trying to
+    # get away from. It starts clean and reads what the last one wrote down for it.
+    #
+    # Asked of the disk rather than remembered, because a note held only in this
+    # process's head is a note lost the moment it restarts — and restarting is exactly
+    # when a fresh conversation most needs to be told where it came from. The file being
+    # there is the whole of the state; nothing has to survive in memory for this to work.
+    note = sessions.carrying_on.pop(project, None) or waiting_note(project)
+    client = await sessions.client_for(project, resume=None if note else request.get("resume"))
+    if note:
+        request = dict(request)
+        request["ask"] = (
+            f"This conversation carries on from one that grew too long. Read {note} first — "
+            "it is what the last one wrote down for you — and then answer what follows "
+            "as if you had been here all along. Do not mention having read it.\n\n"
+            + request["ask"]
+        )
+        # Read once and then put out of the way. Left in place it would be handed to
+        # every conversation that ever started here, including ones with no connection
+        # to it — and a fresh start that begins by reading somebody else's notes is
+        # worse than one that begins with nothing.
+        with contextlib.suppress(Exception):
+            Path(note).replace(Path(note).with_suffix(".read.md"))
 
     # One at a time, on this conversation.
     #
@@ -198,6 +234,88 @@ async def answer(sessions, writer, request):
         else:
             sessions.answering.pop(project, None)
         sessions.used[project] = time.monotonic()
+
+    # Between questions on this project, with the turn given back and nobody waiting.
+    # This is the only honest moment for it: anywhere earlier and a rebuild lands in the
+    # middle of an answer somebody is listening to.
+    await rebuild_if_full(sessions, writer, project)
+
+
+async def how_full(client):
+    """How much of the room is used, nought to one. None when it cannot be told."""
+    try:
+        seen = await client.get_context_usage()
+    except Exception:
+        return None
+    # Asked for rather than worked out. The window is not ours to assume — it is
+    # different per model and larger than any number worth writing down here.
+    room = seen.get("maxTokens") or seen.get("rawMaxTokens")
+    used = seen.get("totalTokens")
+    if not room or used is None:
+        return None
+    return used / room
+
+
+async def rebuild_if_full(sessions, writer, project):
+    """Write down what matters, then let the conversation start again from it."""
+    client = sessions.open.get(project)
+    if client is None:
+        return
+    full = await how_full(client)
+    if full is None or full < FULL_ENOUGH:
+        return
+
+    note = summary_file(project)
+    try:
+        # Asked of the conversation that still remembers everything, while it has room
+        # to answer properly. Written to a file rather than held in hand, so a rebuild
+        # that goes wrong leaves something to read rather than nothing at all — and so
+        # the person can see what it decided to keep and say it kept the wrong things.
+        await client.query(
+            "Before this conversation is started again, write down what the next one needs "
+            f"to carry on without having been here. Put it in {note}, replacing anything "
+            "already there. Say what we are doing and why, what has been decided and what "
+            "was rejected, what is half-finished, and anything that would be expensive to "
+            "learn twice. Leave out what is already written down in the project itself.\n\n"
+            # Older than a day, a summary is enough — nobody picks a thread back up from
+            # three days ago mid-sentence. Newer than that, the actual words matter,
+            # because "that one" and "put it back" and "the other way" all point at
+            # things said recently, and a summary destroys exactly those.
+            "Then, under a heading of its own, write out the last day's exchanges as they "
+            "were actually said, in order and word for word — not summarised. What was "
+            "said recently is what the next questions will point back at.\n\n"
+            "Do not say anything out loud about doing this."
+        )
+        async for _ in client.receive_response():
+            pass
+    except Exception as err:
+        tell(writer, "trouble", text=f"could not write the summary: {err}")
+        return
+
+    if not Path(note).exists():
+        tell(writer, "trouble", text="the summary was not written; leaving the conversation alone")
+        return
+
+    # Only now. Closing before the summary exists would throw away the very thing the
+    # next conversation is supposed to read.
+    await sessions.close(project)
+    # Remembered here rather than announced. The app has already been told the answer is
+    # finished and may well have hung up by now, so a rebuild that depended on the news
+    # arriving would be a rebuild that sometimes did not happen. This side knows, and
+    # this side is the one that has to act on it.
+    sessions.carrying_on[project] = note
+    with contextlib.suppress(Exception):
+        tell(writer, "rebuilt", note=note, wasFull=round(full, 3))
+
+
+def summary_file(project):
+    return str(Path(project) / ".voice-claude" / "carrying-on.md")
+
+
+def waiting_note(project):
+    """A summary left for the next conversation, if one is sitting there unread."""
+    note = summary_file(project)
+    return note if Path(note).exists() else None
 
 
 async def run_the_question(sessions, writer, project, client, request):

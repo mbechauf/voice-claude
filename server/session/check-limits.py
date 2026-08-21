@@ -96,6 +96,90 @@ async def main():
     await sessions.close_everything()
     check("being told to stop closes every conversation", one.closed and two.closed and not sessions.open)
 
+    # ---- rebuilding a conversation before it fills up ----
+    #
+    # The dangerous half is not the rebuild, it is doing it when it should not, or
+    # throwing the old conversation away before anything has been written down to
+    # replace it. Both refusals are checked harder than the success.
+    import tempfile
+
+    class Roomy:
+        """A conversation that answers how full it is, and remembers being asked."""
+
+        def __init__(self, full, writes_to=None):
+            self.full = full
+            self.writes_to = writes_to
+            self.asked = []
+            self.closed = False
+
+        async def get_context_usage(self):
+            return {"totalTokens": int(1000 * self.full), "maxTokens": 1000}
+
+        async def query(self, text):
+            self.asked.append(text)
+            if self.writes_to:
+                Path(self.writes_to).parent.mkdir(parents=True, exist_ok=True)
+                Path(self.writes_to).write_text("what the next one needs")
+
+        async def receive_response(self):
+            return
+            yield   # pragma: no cover - makes this an async generator
+
+        async def disconnect(self):
+            self.closed = True
+
+    class Nowhere:
+        """Somewhere for it to say things, when nobody is listening for them."""
+
+        def __init__(self):
+            self.said = []
+
+        def write(self, line):
+            self.said.append(line.decode())
+
+    nowhere = Nowhere()
+
+    with tempfile.TemporaryDirectory() as where:
+        note = holder.summary_file(where)
+
+        # plenty of room: nothing should happen at all
+        sessions = holder.Sessions()
+        roomy = Roomy(0.2)
+        sessions.open = {where: roomy}
+        await holder.rebuild_if_full(sessions, nowhere, where)
+        check("a conversation with room left is left alone", not roomy.asked and not roomy.closed)
+
+        # full, and the summary gets written: rebuild, and the next one is told to read it
+        sessions = holder.Sessions()
+        full = Roomy(0.9, writes_to=note)
+        sessions.open = {where: full}
+        await holder.rebuild_if_full(sessions, nowhere, where)
+        check("a full conversation is asked to write down what matters", len(full.asked) == 1)
+        check("and only then is it closed", full.closed and where not in sessions.open)
+        check("and the next one is told where to read it", sessions.carrying_on.get(where) == note)
+
+        # THE ONE THAT MATTERS: nothing written down means nothing thrown away.
+        sessions = holder.Sessions()
+        silent = Roomy(0.9)          # says nothing, writes nothing
+        sessions.open = {where: silent}
+        Path(note).unlink(missing_ok=True)
+        await holder.rebuild_if_full(sessions, nowhere, where)
+        check(
+            "a summary that was never written leaves the conversation standing",
+            not silent.closed and where in sessions.open and where not in sessions.carrying_on,
+        )
+
+        # and a conversation that cannot say how full it is is not guessed at
+        class Silent(Roomy):
+            async def get_context_usage(self):
+                raise RuntimeError("no idea")
+
+        sessions = holder.Sessions()
+        mute = Silent(0.9)
+        sessions.open = {where: mute}
+        await holder.rebuild_if_full(sessions, nowhere, where)
+        check("one that cannot say how full it is is left alone", not mute.asked and not mute.closed)
+
     # ---- and it can say what it is holding ----
     sessions = holder.Sessions()
     sessions.open = {"/somewhere": StandIn()}
