@@ -74,10 +74,18 @@ const nameOf = (dir) =>
 // the same one. Getting this from a variable instead of from the question is what
 // sent a typed question into a project nobody was looking at.
 const boundary = (at = project) =>
-  `You are working on ${nameOf(at)}, at ${at}. Everything you are asked ` +
-  `for is about that project and nothing else: read, change and file issues only ` +
-  `there. If something you need appears to be in another project, say so and stop ` +
-  `rather than reaching into it. ` +
+  `You are working on ${nameOf(at)}, at ${at}. ` +
+  // Reading and changing are not the same risk, and one rule covering both was too
+  // blunt. Wandering into a neighbouring project and altering it is the thing that
+  // must not happen; reading a file there to answer a question costs nothing and is
+  // often the whole point — these projects describe each other. So the line is drawn
+  // where the danger actually is.
+  `You may READ anything on this machine, including files in other projects, when it ` +
+  `helps you answer. Say plainly which project you read from whenever it was not this ` +
+  `one, so nobody has to guess where an answer came from. ` +
+  `But everything you CHANGE — files you edit or create, issues you file, commands ` +
+  `you run that alter anything — belongs to ${nameOf(at)} and nothing else. If a ` +
+  `change is needed in another project, say so and stop rather than making it. ` +
   // Being told the boundary without being told the way through it is what makes it
   // sound broken. Asked to work on another project, it was saying "you would need
   // to start a session in that folder" — which is impossible from a car and, worse,

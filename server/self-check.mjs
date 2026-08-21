@@ -231,14 +231,25 @@ function checkTheGate(livePhrases) {
   const makeReader = new Function(`${pieces.join("\n")}; return makePhraseReader;`)();
 
   const NAMED = { open: "claude go", close: "claude stop" };
+  // These made-up phrases exercise the matching itself — words misheard, phrases split
+  // across a pause — and not the separate rule that an instruction must be addressed
+  // first. So they are declared as ones that need no addressing, keeping each test about
+  // one thing. The real phrases below are checked against the addressing rule properly.
+  const ANYTIME = { alwaysAllowed: ["open", "close", "send"] };
   const label = (step) => (step.command ? step.command.toUpperCase() : step.say);
-  const shape = (text) => read(text, NAMED).map(label).join(" | ");
+  const shape = (text) => {
+    const reader = makeReader(NAMED, ANYTIME);
+    const steps = reader.feed(text);
+    const held = reader.held();
+    if (held) steps.push({ say: held });
+    return steps.map(label).join(" | ");
+  };
 
   // The phone hands over whatever it had when you paused, so a phrase said with a
   // pause in the middle of it arrives in two pieces. This is what was quietly
   // breaking it: the words fell through and became part of the question instead.
   const overPieces = (chunks, phrases = NAMED) => {
-    const reader = makeReader(phrases);
+    const reader = makeReader(phrases, ANYTIME);
     const out = [];
     for (const chunk of chunks) for (const step of reader.feed(chunk)) out.push(label(step));
     if (reader.held()) out.push(reader.held());
@@ -273,17 +284,17 @@ function checkTheGate(livePhrases) {
     ["sending when it arrives in pieces", ["what changed", "all", "done"], "what changed | SEND"],
     // "no" is now treated as throat-clearing in front of an instruction and dropped,
     // rather than passed on to Claude as part of the question. That is the intent.
-    ["starting the question again", ["no scratch that", "what about the tests"], "WIPE | what about the tests"],
+    ["starting the question again", ["no hey scratch that", "what about the tests"], "no | WIPE | what about the tests"],
     ["a question about sending things is not a send", ["does it send it to the server"], "does it send it to the server"],
     ["a question containing all", ["are all the tests passing"], "are all the tests passing"],
     ["a question containing done", ["is the migration done yet"], "is the migration done yet"],
     ["and containing both, apart", ["are all the migrations done"], "are all the migrations done"],
-    ["hearing it back", ["what changed lately", "read prompt"], "what changed lately | READ"],
-    ["hearing it back in pieces", ["read", "prompt"], "READ"],
+    ["hearing it back", ["what changed lately", "hey read prompt"], "what changed lately | READ"],
+    ["hearing it back in pieces", ["hey read", "prompt"], "READ"],
     ["a question about reading is not the command", ["can it read the prompt file"], "can it read the prompt file"],
     ["asking it to read something else", ["read the tests"], "read the tests"],
-    ["taking back the last thing said", ["and check the tests", "take that back"], "and check the tests | UNDO"],
-    ["taking it back in pieces", ["take that", "back"], "UNDO"],
+    ["taking back the last thing said", ["and check the tests", "hey take that back"], "and check the tests | UNDO"],
+    ["taking it back in pieces", ["hey take that", "back"], "UNDO"],
     ["a question about taking things back is not the command", ["can you roll that back for me"], "can you roll that back for me"],
     // "back" is held at the end of a piece of speech, because it could still become
     // "back to the advisor app". It is shown on screen while held and delivered the
@@ -292,33 +303,33 @@ function checkTheGate(livePhrases) {
     ["a question mentioning back", ["put the old version back"], "put the old version | back"],
     ["another way of saying send", ["check the tests", "that's it"], "check the tests | SEND"],
     ["and another", ["check the tests", "over to you"], "check the tests | SEND"],
-    ["read misheard as rep", ["rep prompt"], "READ"],
-    ["another way of asking to hear it", ["say it back"], "READ"],
-    ["another way of taking one back", ["delete last"], "UNDO"],
-    ["forgetting the whole drive", ["fresh start"], "FORGET"],
+    ["read misheard as rep", ["hey rep prompt"], "READ"],
+    ["another way of asking to hear it", ["hey say it back"], "READ"],
+    ["another way of taking one back", ["hey delete last"], "UNDO"],
+    ["forgetting the whole drive", ["hey fresh start"], "FORGET"],
     ["a question about starting things", ["how do i start the server"], "how do i start the server"],
     ["a question about deleting a file", ["delete the old migration file"], "delete the old migration file"],
-    ["changing project", ["work on the voice app"], "PROJECT | the voice app"],
-    ["changing project in pieces", ["work on", "the voice app"], "PROJECT | the voice app"],
-    ["asking which project", ["what project are we on"], "WHERE | are we on"],
+    ["changing project", ["hey work on the voice app"], "PROJECT | the voice app"],
+    ["changing project in pieces", ["hey work on", "the voice app"], "PROJECT | the voice app"],
+    ["asking which project", ["hey what project are we on"], "WHERE | are we on"],
     // Politely asked, this reads as an instruction and the reader treats it as one.
     // What stops it becoming a switch is the next test but one: "the login bug" is
     // not a project, so the page puts every word back into the question.
-    ["work on inside an ordinary question", ["can you work on the login bug"], "PROJECT | the login bug"],
+    ["work on inside an ordinary question", ["can you work on the login bug"], "can you work on the login bug"],
     ["a command at the front counts", ["all done"], "SEND"],
     ["a short word that merely sounds alike is not a command", ["can you help me with this test"], "can you help me with this test"],
-    ["taking a newer page", ["load the new page"], "UPDATE"],
-    ["asked politely still counts", ["can you switch to the claude voice app"], "PROJECT | the claude voice app"],
-    ["asked very politely", ["ok so could you please switch to the voice app"], "PROJECT | the voice app"],
+    ["taking a newer page", ["hey load the new page"], "UPDATE"],
+    ["asked politely still counts", ["hey can you switch to the claude voice app"], "PROJECT | the claude voice app"],
+    ["asked very politely", ["ok so hey could you please switch to the voice app"], "ok so | PROJECT | the voice app"],
     ["politeness is not passed on to claude", ["can you all done"], "SEND"],
     ["a command at the end counts", ["check the tests all done"], "check the tests | SEND"],
     ["the same words mid-sentence do not", ["it said all done and then stopped"], "it said all done and then stopped"],
-    ["switching at the front counts", ["work on the voice app"], "PROJECT | the voice app"],
-    ["and wiping at the end", ["no i meant something else scratch that"], "no i meant something else | WIPE"],
-    ["asking what the commands are", ["what can i say"], "HELP"],
-    ["asking for them in pieces", ["what can", "i say"], "HELP"],
-    ["another way of asking", ["help me out"], "HELP"],
-    ["and another", ["say the commands"], "HELP"],
+    ["switching at the front counts", ["hey work on the voice app"], "PROJECT | the voice app"],
+    ["and wiping at the end", ["no i meant something else hey scratch that"], "no i meant something else | WIPE"],
+    ["asking what the commands are", ["hey what can i say"], "HELP"],
+    ["asking for them in pieces", ["hey what can", "i say"], "HELP"],
+    ["another way of asking", ["hey help me out"], "HELP"],
+    ["and another", ["hey say the commands"], "HELP"],
     ["asking for help with the code is not the command", ["can you help me with this test"], "can you help me with this test"],
     ["a question about what something can say", ["what can the server say back"], "what can the server say | back"],
   ];
@@ -1387,7 +1398,15 @@ try {
   // One word fires by accident all day long.
   check(
     "every wording is at least two words",
-    everyWording.every((phrase) => phrase.trim().split(/\s+/).length >= 2),
+    // One-word instructions were forbidden because they fire inside an ordinary
+    // question. That reasoning ended when instructions began needing to be addressed
+    // first: "pause" on its own is now just a word, and only "hey pause" does anything.
+    // The rule still holds for the ones exempt from addressing, which are the only ones
+    // that can still go off unasked.
+    everyWording.every((phrase) => phrase.trim().split(/\s+/).length >= 2) ||
+      spoken.filter(([name]) => name === "send")
+        .flatMap(([, said]) => said)
+        .every((phrase) => phrase.trim().split(/\s+/).length >= 2),
     everyWording.filter((phrase) => phrase.trim().split(/\s+/).length < 2).join(", ") || "all fine",
   );
 
