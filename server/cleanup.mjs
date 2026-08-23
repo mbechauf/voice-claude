@@ -392,7 +392,7 @@ export async function soFar(account) {
       SO_FAR_PATIENCE_MS,
       { startAgainIfSlow: false },
     );
-    return worthSaying(text);
+    return worthSaying(text, plain);
   } catch {
     return "";
   }
@@ -405,12 +405,44 @@ export async function soFar(account) {
  * writing a document, or it has started reading out symbols. Both are worse than the
  * plain count of steps the phone can always fall back on.
  */
-export function worthSaying(summary) {
+// Words that give away a summary about the machinery rather than about the work. The
+// account is full of them, so a model with nothing real to say reaches for them.
+const MACHINERY = /\b(assistant|the model|agent|bash|grep|command|tool|stdout|exit code|render|node|parameter|argument)\b/i;
+
+// Somebody else's voice. The account is written about "the assistant", and a small
+// model copies that framing rather than speaking as itself — "the assistant found
+// that…", "the model has decided to…". Whatever follows it may even be true, but it
+// is being narrated by a bystander who does not exist, and in a car that is the first
+// thing that sounds wrong.
+const NARRATED = /^(?:the\s+)?(?:assistant|model|agent|ai)\b/i;
+
+/**
+ * Is this worth saying out loud, and is it about anything?
+ *
+ * `account` is what it was written from. Given it, every number in the sentence has to
+ * appear there too — the failure this exists for was a small model stitching together
+ * figures from unrelated steps into a confident sentence that was not true of
+ * anything: "51 students are the second riskiest, and 52 is the only one that passed".
+ * Both numbers were real; the sentence was invented. Anything it says about counts now
+ * has to be traceable to something that actually came back.
+ */
+export function worthSaying(summary, account = null) {
   const first = String(summary ?? "").trim().replace(/^["']|["']$/g, "");
   if (!first) return "";
+  // The honest answer when there was nothing to report, and it is asked for on purpose.
+  if (/^nothing\b/i.test(first)) return "";
   if (/[`{}<>[\]|#*_]|https?:/.test(first)) return "";
+  if (NARRATED.test(first) || MACHINERY.test(first)) return "";
   const words = first.split(/\s+/).filter(Boolean);
-  if (words.length < 4 || words.length > 60) return "";
+  if (words.length < 4 || words.length > 40) return "";
+
+  if (account !== null) {
+    const digits = (text) => String(text).replace(/[,\s]/g, "");
+    const there = digits(account);
+    for (const number of first.match(/\d[\d,]*(?:\.\d+)?/g) ?? []) {
+      if (!there.includes(digits(number))) return "";
+    }
+  }
   return first;
 }
 

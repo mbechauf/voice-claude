@@ -32,6 +32,16 @@ fs.rmSync(scratchRunning, { force: true });
 // And it must not close a session somebody has walked away from to a desk. Sweeping
 // those is right when the app really starts and wrong when a test does.
 env.VOICE_CLAUDE_LEAVE_HANDOVERS = "1";
+// And its own memory of which conversation belongs to which project. This one was
+// missed, and the cost was not theoretical: the checks start a real app, and a real
+// app starts on whichever project was last being worked on. One of the things checked
+// is that a drive can be started over — which, on the real store, threw away the
+// pointer to that project's conversation. Running the checks quietly deleted a day of
+// work from the project nobody was testing, and nothing said so; it simply came back
+// the next morning with no memory of anything.
+env.VOICE_CLAUDE_MEMORY_FILE = path.join(root, ".voice-claude", "conversations.check.json");
+fs.rmSync(env.VOICE_CLAUDE_MEMORY_FILE, { force: true });
+
 // Its own conversation helper, on its own socket. Stopping now genuinely stops that
 // helper — which is the point of the change — and the one this machine is really using
 // must not be the one a test stops. Sharing it would mean running the checks ended the
@@ -527,6 +537,39 @@ function checkFinishedThoughts() {
     waitBefore(true, true) === 10_000);
   check("the model can bring forward an unfinished-looking one, but not all the way",
     waitBefore(false, false) === 3_000);
+
+  // A few words that stand on their own, then quiet, is the case where waiting teaches
+  // nothing. The two guards on it are what matter: shortness alone must never do this,
+  // or half a sentence gets asked about the instant somebody draws breath.
+  check("a few words are asked about almost at once",
+    waitBefore(true, null, true) === 500);
+  check("and a few words that do not read as a whole sentence are asked about too",
+    waitBefore(false, null, true) === 500);
+  check("while the same words in a long question keep the old wait",
+    waitBefore(false, null, false) === 10_000);
+  check("and the model saying more is coming still wins over shortness",
+    waitBefore(true, true, true) === 10_000);
+
+  // What counts as a few words. Read off the page rather than restated here, so the
+  // test cannot quietly agree with a copy of itself.
+  const few = page.match(/function justAFewWords[\s\S]*?\n}/);
+  if (!few) {
+    check("the page can be read for what counts as a few words", false);
+    return;
+  }
+  const aFew = new Function(`${parts.join("\n")}; ${few[0]}; return justAFewWords;`)();
+  const lengths = [
+    ["a three-word instruction", "run the tests", true],
+    ["filler does not make it long", "um so run the tests", true],
+    ["a whole paragraph is not a few words",
+      "have a look at the tests and then tell me which ones are failing", false],
+    ["nothing at all is not a few words", "   ", false],
+    ["and one word on its own is not worth asking about", "tests", false],
+  ];
+  for (const [name, text, expected] of lengths) {
+    const got = aFew(text);
+    check(`a few words: ${name}`, got === expected, got === expected ? "" : `read as ${got}`);
+  }
 }
 
 function checkPickingAProject(names) {
@@ -729,6 +772,45 @@ async function checkItRemembersPerProject() {
       check(`worth saying: ${name}`, got === expected, got === expected ? "" : `got "${got}"`);
     }
 
+    // Every one of these was actually said out loud to somebody driving. They are the
+    // whole reason this exists: told to describe machinery without naming machinery, a
+    // small model narrates in a stranger's voice and stitches unrelated figures into
+    // sentences that are not true of anything.
+    const account = [
+      "Did: Grep pattern kept",
+      "Got back: 39897 rows kept, 51 dropped",
+      "Said: The smoke test works, but about a fifth of replacements still slip.",
+    ].join("\n");
+    const gibberish = [
+      ["narrated by somebody who is not there",
+        "The assistant found 277 real questions captured, but no logged ones."],
+      ["the model talking about the model",
+        "The model has decided to delete the bad wordings and train on what is left."],
+      ["a summary about the plumbing",
+        "The Bash command was successful, but the connection failed with 1 malformed result."],
+      ["machinery dressed up as a finding",
+        "It found a registry snapshot, but the result render was progress."],
+      ["figures welded together that never met",
+        "It found that 51 students are the second riskiest, and 8823 is the only one that passed."],
+      ["nothing to report, said honestly", "nothing"],
+    ];
+    for (const [name, said] of gibberish) {
+      const got = worthSaying(said, account);
+      check(`not said out loud: ${name}`, got === "", got ? `still said "${got}"` : "");
+    }
+    check("a real finding with real numbers still gets through",
+      worthSaying("39897 rows were kept and 51 were dropped.", account) !== "");
+
+    // And the one that matters most: when it has said something itself, that is what
+    // gets said, and no model is asked anything at all.
+    const { itsOwnWords } = await import("./claude-bridge.mjs");
+    check("its own words are preferred to any summary of them",
+      itsOwnWords(account.split("\n")) === "The smoke test works, but about a fifth of replacements still slip.");
+    check("and with nothing said, there is nothing of its own to use",
+      itsOwnWords(["Did: Grep pattern kept", "Got back: 39897 rows"]) === "");
+    check("a written-down thing it said is not treated as speech",
+      itsOwnWords(["Said: Reading `server/index.mjs` now"]) === "");
+
     // Saying which file and what it searched for is the difference between knowing
     // something is happening and knowing what is happening. But a path or a thicket of
     // symbols read aloud is worse than the vague phrase it replaced.
@@ -771,6 +853,13 @@ async function checkItRemembersPerProject() {
       gaveUp = true;
     }
     check("with no session open, asking gives up rather than hanging", gaveUp || nothingThere);
+
+    // Whether the helper that is running is running the code that is on disk. It is cut
+    // loose so that this app restarting cannot take it down, and the cost of that is
+    // this: a fix to its code changes nothing until it is restarted, and everything
+    // looks fixed. Hours of a real drive went that way.
+    check("it can say whether the helper is running older code than it should",
+      typeof holder.runningOldCode() === "boolean");
 
     const { lostTheConversation } = await import("./claude-bridge.mjs");
     check("it can tell a vanished conversation from a real failure",
@@ -1076,6 +1165,44 @@ async function checkOneVoice() {
       itsOwnTail(gate.saying, "yes go on") === false);
     check("and a real question in that window still gets through",
       itsOwnTail(gate.saying, "what about the billing problem") === false);
+  }
+
+  // ---- cut off on purpose: no deaf window at all ----
+  //
+  // The one that was actually going wrong in a car. Interrupting a long explanation
+  // stopped the talking but ate the sentence that did the interrupting, because it was
+  // about what had just been said and so looked like the tail of it coming back.
+  {
+    const it = pretendMouth();
+    const make = build(`return (mouth) => oneVoice({ mouth, settleMs: 5_000 })`)();
+    const gate = make(it.mouth);
+    gate.speak("The migration is the only file left to change.");
+    await new Promise((r) => setTimeout(r, 0));
+    gate.silence();
+    await new Promise((r) => setTimeout(r, 5));
+    check("a sentence you cut off leaves nothing to be deaf about",
+      gate.busy === false && gate.settling === false,
+      `busy ${gate.busy}, settling ${gate.settling}`);
+
+    // And cutting it off after it had already finished, while the window was still
+    // open, has to close the window too — that is the same act a beat later.
+    const also = make(it.mouth);
+    also.speak("The migration is the only file left to change.");
+    await new Promise((r) => setTimeout(r, 0));
+    it.endTheSentence();
+    await new Promise((r) => setTimeout(r, 5));
+    check("and it is settling until somebody speaks", also.settling === true);
+    also.silence();
+    check("cutting in during the quiet afterwards closes it as well", also.settling === false);
+  }
+
+  // ---- the word gets through the deaf window, whatever else it says ----
+  {
+    const page2 = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+    const branch = page2.match(/} else if \(mouth\?\.settling &&[^)]*\)/);
+    check("addressing it is never mistaken for its own tail",
+      Boolean(branch) && branch[0].includes("!addressed"),
+      branch ? branch[0] : "couldn't find the test for its own tail");
   }
 
   // ---- the thing it says to itself must not read back as an instruction ----

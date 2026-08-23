@@ -694,7 +694,16 @@ function oneVoice({ mouth, settleMs = 900, allowanceFor, onStart, onFinish, now 
         deafUntil = now() + settleMs;
       }
     } finally {
-      deafUntil = now() + settleMs;
+      // A sentence that ran to its end leaves a tail on its way back, and the moment
+      // after it is the moment to be careful. A sentence somebody cut off is the
+      // opposite: it stopped because they are talking, so the words that follow are
+      // theirs by definition, and being careful with them means throwing them away.
+      //
+      // That is the fault this fixes. Interrupting a long explanation and then asking
+      // about the very thing it was explaining shares most of its words with what it
+      // had just said — which is exactly what "that was only my own voice" was looking
+      // for. The interruption worked, the talking stopped, and the sentence vanished.
+      deafUntil = cutOff ? 0 : now() + settleMs;
       waiting.length = 0;
       cutOff = false;
       running = false;
@@ -719,6 +728,10 @@ function oneVoice({ mouth, settleMs = 900, allowanceFor, onStart, onFinish, now 
     silence() {
       cutOff = true;
       waiting.length = 0;
+      // Cleared here as well, and not only where the talking unwinds, because being cut
+      // off while it was already quiet has to count too — half a second after the last
+      // word is still inside the window, and is still somebody talking.
+      deafUntil = 0;
       try { mouth.hush?.(); } catch {}
     },
 
@@ -987,6 +1000,31 @@ function soundsFinished(text) {
   if (/[.?!]$/.test(raw) && !CANNOT_END.has(words[words.length - 1])) return true;
 
   return !CANNOT_END.has(words[words.length - 1]);
+}
+
+/**
+ * Is this short enough to be the whole of what somebody meant to say?
+ *
+ * A pause is read differently depending on how much came before it. Three or four
+ * words that stand on their own — "run the tests", "commit that" — are almost always
+ * the whole thing: nobody builds a list one breath at a time out of something that
+ * short. The same pause after two long sentences is far more often somebody drawing
+ * breath in the middle of a third.
+ *
+ * So this is not a special case for short questions. It is one more piece of evidence
+ * about whether more is coming, sitting alongside whether the words read as a finished
+ * sentence and what the Mac made of the pause — and the more of those agree, the less
+ * time is worth spending waiting to find out.
+ *
+ * Measured on the whole question so far, not the last breath, because the whole
+ * question is what would be sent.
+ */
+function justAFewWords(text, most = 6) {
+  const words = plainWords(withoutFiller(String(text ?? "")));
+  // Two, not one. Not out of any idea about sentences — a single word on its own is
+  // far more often a stray noise or half of something misheard than anything somebody
+  // meant to send, and asking about it is asking about nothing.
+  return words.length >= 2 && words.length <= most;
 }
 
 /**
@@ -1563,10 +1601,22 @@ function splitFrontEnd() {
   // action against half a question; waiting too long costs a beat and the send phrase,
   // which is what happens today anyway. So "more is coming" pushes the wait right out,
   // while "sounds finished" only shortens a long wait — it never overrides the words.
-  function waitBefore(finished, more) {
+  function waitBefore(finished, more, short) {
+    const briskly = setup.offerAfterShort ?? 500;
     const soon = setup.offerAfter ?? 1_500;
     const eventually = setup.offerAfterPause ?? 10_000;
     if (more === true) return eventually;
+    // A few words and then quiet, and that is the whole of it. Whether they read as a
+    // finished sentence is deliberately not asked here: nobody speaks in finished
+    // sentences at the wheel, and a test for one was refusing perfectly ordinary
+    // half-said questions that were plainly all somebody was going to say.
+    //
+    // What makes this safe is not the words, it is the shortness and the silence
+    // together — and that it only ever offers. Carry on talking and the offer is called
+    // off before it is made, exactly as before. In practice the Mac's opinion does not
+    // come back in time to change this one, which is the trade being made on purpose:
+    // a second opinion slower than the wait it would shorten is no use here.
+    if (short) return briskly;
     if (finished) return soon;
     if (more === false) return setup.offerAfterThought ?? 3_000;
     return eventually;
@@ -1603,6 +1653,12 @@ function splitFrontEnd() {
     // the end of everything, and this is a test for a full stop.
     const said = asHeard();
     const finished = soundsFinished(said);
+    const short = justAFewWords(said, setup.aFewWords ?? 6);
+    // How long this particular pause is being given. Kept where the offer can see it,
+    // because the wait and the quiet it insists on are the same judgement: there is no
+    // sense asking after half a second and then refusing to speak until a second of
+    // silence has gone by.
+    let waited = waitBefore(finished, null, short);
     const offer = () => {
       offerTimer = null;
       if (waitingOn || working || live || reader.held()) return;
@@ -1615,7 +1671,7 @@ function splitFrontEnd() {
       // piece could land while you were plainly still in mid-sentence — and then, being
       // its own voice, it made everything deaf and swallowed the rest of what you said.
       const quietFor = Date.now() - lastHeardAt;
-      const needed = setup.quietBeforeOffering ?? 1_200;
+      const needed = Math.min(setup.quietBeforeOffering ?? 1_200, waited);
       if (quietFor < needed) { offerTimer = setTimeout(offer, needed - quietFor); return; }
       trace("OFFERING TO SEND", asTidied());
       offering = true;
@@ -1634,11 +1690,12 @@ function splitFrontEnd() {
     // is only ever worth doing while this is still the same question and the offer has
     // not already been made. Anything said in the meantime has cancelled all of it.
     const startedAt = Date.now();
-    offerTimer = setTimeout(offer, waitBefore(finished, null));
+    offerTimer = setTimeout(offer, waited);
     askAboutThePause(said).then((more) => {
       if (more === null || !offerTimer) return;
       if (asHeard() !== said) return;
-      const left = waitBefore(finished, more) - (Date.now() - startedAt);
+      waited = waitBefore(finished, more, short);
+      const left = waited - (Date.now() - startedAt);
       trace("the pause", more ? "he is mid-thought, holding off" : "sounds like a finished thought");
       clearTimeout(offerTimer);
       offerTimer = setTimeout(offer, Math.max(300, left));
@@ -2319,13 +2376,19 @@ function splitFrontEnd() {
         trace("ignored (it was talking)", spokenAloud);
         return;
       }
-    } else if (mouth?.settling && soundsLikeItself(text, mouth.saying, { whenNothingDistinctive: false })) {
+    } else if (mouth?.settling && !addressed && soundsLikeItself(text, mouth.saying, { whenNothingDistinctive: false })) {
       // The sound has stopped but its last words are still on their way back. Dictation
       // runs a beat behind the audio, so the end of its own sentence used to land here
       // just after it believed it had finished — when nothing was checking at all — and
       // was written down as the question. That is the fault this whole change exists
       // for. Only its own words are refused, so a real question said the instant it
       // stops is still heard.
+      //
+      // Never the word, though, on the same grounds as everywhere else: the app cannot
+      // say it, so a sentence carrying it cannot be the app's own voice, however much
+      // of the rest matches. Addressing it has to work at every moment — while it is
+      // talking, in the beat after it stops, and during anything it announces on its
+      // own account — or the one thing with no threshold on it has a gap in it.
       trace("ignored (its own tail)", text);
       return;
     }
@@ -2370,6 +2433,14 @@ function splitFrontEnd() {
   }
 
   function fromClaude(kind, text) {
+    // Housekeeping said in plain words, and said whatever else is going on. It goes
+    // through the same one queue as everything else, so it lands after the answer that
+    // is still being read out rather than on top of it.
+    if (kind === "notice") {
+      log(text, "work");
+      mouth?.speak(text);
+      return;
+    }
     if (kind === "progress") {
       log(text, "work");
       setState(text);
@@ -2669,6 +2740,11 @@ function realtimeFrontEnd() {
   }
 
   function fromClaude(kind, text) {
+    if (kind === "notice") {
+      log(text, "work");
+      speakThrough(`[Housekeeping, not from the user and not an answer: ${text} Say that briefly in your own words, then wait.]`);
+      return;
+    }
     if (kind === "progress") {
       log(text, "work");
       // Only interrupt with progress if it's been quiet for a while.

@@ -84,6 +84,18 @@ def tell(writer, kind, **rest):
     writer.write((json.dumps({"kind": kind, **rest}) + "\n").encode())
 
 
+def speak(writer, text):
+    """Something the person should hear, in the words they should hear it in.
+
+    Kept apart from the progress notes and from trouble on purpose. Progress is about
+    the question being answered and is rationed; trouble goes to the app rather than to
+    the person. This is the machinery telling somebody something was done to their
+    conversation, which is never worth rationing and never worth swallowing.
+    """
+    with contextlib.suppress(Exception):
+        tell(writer, "notice", text=text)
+
+
 class Sessions:
     """One live conversation per project, made when first asked for.
 
@@ -256,6 +268,69 @@ async def how_full(client):
     return used / room
 
 
+# How long to listen for something already on its way before deciding the line is
+# clear. Short, because it is paid on every single question; long enough that a reply
+# already sitting there is certain to be seen, which it is — anything queued is
+# delivered the moment it is asked for.
+LINE_CLEAR_S = float(os.environ.get("VOICE_CLAUDE_LINE_CLEAR", "0.15"))
+# And how long to keep listening once something has turned up, because a turn arrives
+# in pieces with thinking time between them and stopping half way through it would
+# leave the rest to be mistaken for the next answer.
+MID_TURN_S = float(os.environ.get("VOICE_CLAUDE_MID_TURN", "5"))
+# A stray turn that never ends must not hold up the question. Better a question that
+# goes out with the line not quite clear than one that never goes out.
+GIVE_UP_S = float(os.environ.get("VOICE_CLAUDE_CLEARING_LIMIT", "30"))
+
+
+async def next_thing_said(client, patience):
+    """The next thing this conversation says, or None if it says nothing for a while.
+
+    A fresh reader each time on purpose: giving up on one ends it, and the replies are
+    a queue belonging to the conversation rather than to any reader, so the next reader
+    carries on from exactly where this one stopped. Nothing waiting is lost by looking.
+    """
+    reader = client.receive_messages().__aiter__()
+    try:
+        return await asyncio.wait_for(reader.__anext__(), patience)
+    except (asyncio.TimeoutError, StopAsyncIteration):
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            await reader.aclose()
+
+
+async def clear_the_line(client):
+    """Throw away anything said before we asked, and say how much there was.
+
+    This is the off-by-one, and it is worth stating plainly because it looks impossible
+    until you see it. A conversation does not only speak when spoken to. A job left
+    running in the background finishes, the conversation is told so, and it answers
+    that — with nobody waiting, into a queue nobody is reading. It sits there.
+
+    The next question then reads the queue from the beginning, finds that reply, sees
+    it end, and reports it as the answer. It is a whole reply, it is about this project,
+    it is recent, and it is completely wrong — it is the answer to something else. From
+    then on every answer is one behind, permanently, and the last one is never heard at
+    all. Two hours of a real drive went that way: a question about which fixes were
+    meant got back a report on a batch job, and the reply that actually answered it was
+    never spoken.
+
+    Nothing here tries to be clever about whose reply is whose, because nothing in what
+    comes back says so. It relies on one thing that is always true: whatever is already
+    waiting when we ask cannot be an answer to what we are about to ask.
+    """
+    dropped = 0
+    mid_turn = False
+    started = time.monotonic()
+    while time.monotonic() - started < GIVE_UP_S:
+        said = await next_thing_said(client, MID_TURN_S if mid_turn else LINE_CLEAR_S)
+        if said is None:
+            break
+        dropped += 1
+        mid_turn = not isinstance(said, ResultMessage)
+    return dropped
+
+
 async def rebuild_if_full(sessions, writer, project):
     """Write down what matters, then let the conversation start again from it."""
     client = sessions.open.get(project)
@@ -265,7 +340,36 @@ async def rebuild_if_full(sessions, writer, project):
     if full is None or full < FULL_ENOUGH:
         return
 
+    # The turn is taken back for this, and given up on rather than waited for. Writing
+    # the summary is a question on the same conversation as any other, and two of those
+    # at once is the exact fault the turn exists to prevent — one stream of replies read
+    # from both ends, an answer that never finishes, and then the conversation closed
+    # out from under somebody mid-sentence. If a question got in first, this simply does
+    # not happen now: the check runs again after that one, a few seconds later.
+    turn = sessions.turns.setdefault(project, asyncio.Lock())
+    if turn.locked():
+        return
+    await turn.acquire()
+    try:
+        await rebuild_now(sessions, writer, project, client, full)
+    finally:
+        turn.release()
+
+
+async def rebuild_now(sessions, writer, project, client, full):
+    """The rebuild itself, with the conversation to itself."""
     note = summary_file(project)
+
+    # Said out loud before anything happens, and this is the point of saying it. A
+    # conversation going back to knowing nothing is the largest thing that happens to
+    # it, and it happens to somebody who is driving and cannot look at a screen: with
+    # nothing said, the first sign is an answer that has forgotten what was just agreed,
+    # which reads as the thing breaking rather than as housekeeping. The silence needs
+    # covering too — writing the summary takes a while, and a silence straight after an
+    # answer is indistinguishable from a fault.
+    speak(writer, "This conversation is getting full. I'm writing down where we've got "
+                  "to, then starting a fresh one from that note.")
+
     try:
         # Asked of the conversation that still remembers everything, while it has room
         # to answer properly. Written to a file rather than held in hand, so a rebuild
@@ -288,12 +392,18 @@ async def rebuild_if_full(sessions, writer, project):
         )
         async for _ in client.receive_response():
             pass
+    # Every way out of this is said too, and that is not politeness. Having announced a
+    # restart, going quiet and carrying on regardless leaves somebody believing the
+    # conversation was emptied when it was not — and acting on that belief, by repeating
+    # things it still remembers perfectly well.
     except Exception as err:
         tell(writer, "trouble", text=f"could not write the summary: {err}")
+        speak(writer, "I couldn't write that down, so I'm leaving this conversation as it is.")
         return
 
     if not Path(note).exists():
         tell(writer, "trouble", text="the summary was not written; leaving the conversation alone")
+        speak(writer, "Nothing got written down, so I'm leaving this conversation as it is.")
         return
 
     # Only now. Closing before the summary exists would throw away the very thing the
@@ -306,6 +416,8 @@ async def rebuild_if_full(sessions, writer, project):
     sessions.carrying_on[project] = note
     with contextlib.suppress(Exception):
         tell(writer, "rebuilt", note=note, wasFull=round(full, 3))
+    speak(writer, "Done. The next thing you ask starts a fresh conversation, "
+                  "and it reads that note first.")
 
 
 def summary_file(project):
@@ -319,6 +431,17 @@ def waiting_note(project):
 
 
 async def run_the_question(sessions, writer, project, client, request):
+    # Before asking, and never after: what is already there is the giveaway, and after
+    # the answer there is no way to tell a stray reply from one still arriving.
+    dropped = await clear_the_line(client)
+    if dropped:
+        print(f"cleared {dropped} left over on {project} before asking", flush=True)
+        # Said out loud, because it is not nothing. Something ran to completion while
+        # nobody was listening, and its report is now only in the conversation's memory
+        # rather than in anybody's ears. Better to know it happened and be able to ask.
+        speak(writer, "Something finished on its own while nobody was asking. "
+                      "I've left that out and answered you instead.")
+
     await client.query(request["ask"])
     final = ""
     async for message in client.receive_response():
@@ -363,9 +486,16 @@ async def serve(reader, writer, sessions):
             # process instead would leave every Claude underneath it orphaned, which is
             # the same mess one level down.
             await sessions.close_everything()
-            tell(writer, "stopping")
-            await writer.drain()
+            # Set before the goodbye is sent, and never after. Whoever asked has what
+            # they came for the moment the line is written, and hangs up — so sending
+            # it can fail on a socket the other end has already dropped. That failure
+            # used to jump straight past the one line that actually stops this thing,
+            # which is how it carried on running for seven hours after being told to
+            # go, while everything that asked reported success.
             asyncio.get_running_loop().call_soon(stopping.set)
+            with contextlib.suppress(Exception):
+                tell(writer, "stopping")
+                await writer.drain()
         elif request.get("what") == "forget":
             await sessions.close(request["project"])
             tell(writer, "forgotten")

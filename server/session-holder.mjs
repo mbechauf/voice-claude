@@ -17,7 +17,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { ACROSS_RESTARTS, isStillItself, noteEnded, noteStarted, written } from "./running.mjs";
+import { ACROSS_RESTARTS, end, isStillItself, noteEnded, noteStarted, written } from "./running.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -93,6 +93,61 @@ export function startIfNeeded() {
 
     return waitUntilUp();
   });
+}
+
+/**
+ * Is the helper that is running older than the code it runs?
+ *
+ * Being cut loose is what makes it survive this app restarting, and that is right. The
+ * price is that changing its code changes nothing: the app restarts itself the moment
+ * any file changes, announces that it has, and the one thing that did not restart is
+ * the one thing the change was in. Everything looks fixed and nothing is.
+ *
+ * That is not hypothetical. A fault that had been costing whole conversations was found
+ * and fixed, the app restarted itself, and the fault carried on happening for hours,
+ * because the part it was fixed in had been running since the morning.
+ *
+ * Told by the socket rather than by asking the process: the file is made when the
+ * helper starts listening, so its own timestamp is the moment the running one began.
+ */
+export function runningOldCode() {
+  try {
+    return fs.statSync(HOLDER).mtimeMs > fs.statSync(SOCKET).mtimeMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Put that right, by ending it and starting it again on the code that is there now.
+ *
+ * Safe to do, and only because of something decided earlier: the app writes down which
+ * conversation belongs to which project and hands that back when it asks, so a helper
+ * that goes away and comes back picks up the same conversations rather than losing
+ * them. Restarting it costs a second and nothing else.
+ *
+ * Meant for startup, when nobody is waiting on an answer — never in the middle of a
+ * question, where it would be the thing that lost one.
+ */
+export async function freshenIfStale() {
+  if (!isInstalled()) return false;
+  if (!(await isRunning())) return false;
+  if (!runningOldCode()) return false;
+
+  const went = await stop().catch(() => false);
+  if (!went) {
+    // Asked politely and it stayed. Ended outright rather than left, because the
+    // alternative is what was happening before: everything reports that it restarted,
+    // nothing did, and the code being run is whatever was there this morning.
+    const mine = written().find((e) => e.rule === ACROSS_RESTARTS && isStillItself(e));
+    if (mine) end(mine);
+    try { fs.rmSync(SOCKET, { force: true }); } catch {}
+  }
+
+  await startIfNeeded().catch(() => false);
+  // Said only if it is true. A restart that quietly did not happen is worse than one
+  // that failed loudly — that is the whole of what went wrong here.
+  return !runningOldCode();
 }
 
 function waitUntilUp(until = Date.now() + STARTUP_MS) {

@@ -137,6 +137,19 @@ async def main():
         def write(self, line):
             self.said.append(line.decode())
 
+        def spoken(self):
+            """Only the lines meant for a person to hear."""
+            import json as _json
+            out = []
+            for line in self.said:
+                try:
+                    was = _json.loads(line)
+                except Exception:
+                    continue
+                if was.get("kind") == "notice":
+                    out.append(was.get("text", ""))
+            return out
+
     nowhere = Nowhere()
 
     with tempfile.TemporaryDirectory() as where:
@@ -148,25 +161,57 @@ async def main():
         sessions.open = {where: roomy}
         await holder.rebuild_if_full(sessions, nowhere, where)
         check("a conversation with room left is left alone", not roomy.asked and not roomy.closed)
+        check("and says nothing about it", not nowhere.spoken())
 
         # full, and the summary gets written: rebuild, and the next one is told to read it
         sessions = holder.Sessions()
         full = Roomy(0.9, writes_to=note)
         sessions.open = {where: full}
-        await holder.rebuild_if_full(sessions, nowhere, where)
+        spoke = Nowhere()
+        await holder.rebuild_if_full(sessions, spoke, where)
         check("a full conversation is asked to write down what matters", len(full.asked) == 1)
         check("and only then is it closed", full.closed and where not in sessions.open)
         check("and the next one is told where to read it", sessions.carrying_on.get(where) == note)
+        # The announcement is the point of the change: unannounced, a conversation that
+        # has quietly forgotten everything is indistinguishable from a broken one, and
+        # the person it happens to is driving. Both ends are said — the warning before
+        # the wait, and the all-clear after it — so nobody is left listening to silence.
+        said = spoke.spoken()
+        check("a rebuild is announced before it starts", len(said) >= 2, f"{said}")
+        check("and the all-clear comes after it", len(said) >= 2 and "fresh" in said[-1])
+
+        # Somebody asking again in the meantime is what the announcement makes likely, so
+        # it must not run alongside them: a second question on one conversation is the
+        # fault the turn exists to stop.
+        sessions = holder.Sessions()
+        busy = Roomy(0.9, writes_to=note)
+        sessions.open = {where: busy}
+        sessions.turns[where] = asyncio.Lock()
+        await sessions.turns[where].acquire()
+        quiet = Nowhere()
+        await holder.rebuild_if_full(sessions, quiet, where)
+        sessions.turns[where].release()
+        check(
+            "a question already running puts the rebuild off rather than joining in",
+            not busy.asked and not busy.closed and not quiet.spoken(),
+        )
 
         # THE ONE THAT MATTERS: nothing written down means nothing thrown away.
         sessions = holder.Sessions()
         silent = Roomy(0.9)          # says nothing, writes nothing
         sessions.open = {where: silent}
         Path(note).unlink(missing_ok=True)
-        await holder.rebuild_if_full(sessions, nowhere, where)
+        gave_up = Nowhere()
+        await holder.rebuild_if_full(sessions, gave_up, where)
         check(
             "a summary that was never written leaves the conversation standing",
             not silent.closed and where in sessions.open and where not in sessions.carrying_on,
+        )
+        # Having said it was about to start again, going quiet would leave somebody
+        # believing it had — and repeating themselves for no reason.
+        check(
+            "and having announced it, it says the restart did not happen",
+            len(gave_up.spoken()) >= 2, f"{gave_up.spoken()}",
         )
 
         # and a conversation that cannot say how full it is is not guessed at
@@ -179,6 +224,82 @@ async def main():
         sessions.open = {where: mute}
         await holder.rebuild_if_full(sessions, nowhere, where)
         check("one that cannot say how full it is is left alone", not mute.asked and not mute.closed)
+
+    # ---- the off-by-one: a reply nobody asked for must not become the next answer ----
+    #
+    # Taken from a real drive. A background job finished, the conversation was told and
+    # answered that with nobody listening, and from then on every spoken answer was the
+    # one before — the question about which fixes were meant got a report on a batch
+    # job, and the reply that actually answered it was never heard at all.
+    class Chatty:
+        """A conversation that has already said something nobody asked for.
+
+        Deliberately shaped like the real one: replies come from a queue belonging to
+        the conversation, and a reader that gives up leaves what is left where it is.
+        """
+
+        def __init__(self, waiting):
+            self.queue = list(waiting)
+            self.asked = []
+            self.closed = False
+
+        async def query(self, text):
+            self.asked.append(text)
+            self.queue.extend([Said(f"answer to: {text}"), Ended(f"answer to: {text}")])
+
+        def receive_messages(self):
+            async def reader():
+                while self.queue:
+                    yield self.queue.pop(0)
+                # Nothing left: wait rather than end, exactly as a live one does.
+                await asyncio.sleep(3600)
+            return reader()
+
+        async def receive_response(self):
+            while self.queue:
+                said = self.queue.pop(0)
+                yield said
+                if isinstance(said, Ended):
+                    return
+
+        async def disconnect(self):
+            self.closed = True
+
+    class Said:
+        def __init__(self, text):
+            self.text = text
+
+    class Ended(holder.ResultMessage):
+        def __init__(self, text):
+            self.result = text
+            self.subtype = "success"
+
+    stray = [Said("the background job finished"), Ended("the background job finished")]
+    chatty = Chatty(stray)
+    left = await holder.clear_the_line(chatty)
+    check("a reply nobody asked for is cleared before the question goes out", left == 2, f"{left}")
+
+    heard = Nowhere()
+    sessions = holder.Sessions()
+    # A fresh one, still carrying the stray: the whole point is that the question runner
+    # clears it for itself rather than relying on somebody having cleared it first.
+    chatty = Chatty(stray)
+    sessions.open = {"/somewhere": chatty}
+    await holder.run_the_question(sessions, heard, "/somewhere", chatty, {"ask": "which three fixes"})
+    answers = [line for line in heard.said if "answer to" in line]
+    check(
+        "so the answer that comes back is to the question that was asked",
+        len(answers) == 1 and "which three fixes" in answers[0],
+        answers[0][:120] if answers else "nothing came back",
+    )
+    check("and being skipped past is said out loud rather than hidden",
+          any("on its own" in line for line in heard.spoken()))
+
+    # And the ordinary case pays nothing and says nothing: a clear line stays quiet.
+    quiet = Chatty([])
+    calm = Nowhere()
+    await holder.run_the_question(sessions, calm, "/somewhere", quiet, {"ask": "what changed"})
+    check("a conversation with nothing waiting is not announced at all", not calm.spoken())
 
     # ---- and it can say what it is holding ----
     sessions = holder.Sessions()

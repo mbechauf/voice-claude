@@ -30,7 +30,7 @@ import {
   VOICE_NAME,
   WHAT_EACH_DOES,
 } from "./config.mjs";
-import { forgetConversation, isBusy, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
+import { forgetConversation, isBusy, itsOwnWords, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
 import * as openSessions from "./session-holder.mjs";
@@ -582,7 +582,9 @@ async function handle(req, res) {
   if (url.pathname === "/so-far" && req.method === "POST") {
     const notes = whatHasHappened();
     if (!notes.length) return send(res, 200, { summary: "" });
-    const summary = await soFar(notes.join("\n"));
+    // Its own words first, and then no model at all. A sentence it wrote itself is
+    // already true, already plain, and already in the right voice.
+    const summary = itsOwnWords(notes) || await soFar(notes.join("\n"));
     if (summary) note("what has been going on", summary);
     return send(res, 200, { summary, steps: notes.length });
   }
@@ -797,6 +799,17 @@ server.listen(PORT, () => {
   // the new ones — which is how a machine ends up carrying hours-old processes nobody
   // remembers starting. Startup is the only moment where "everything still running was
   // left by somebody else" is reliably true, so it is the right place to look.
+  // And the one leftover that is not a process at all: a conversation helper still
+  // running yesterday's copy of its own code. It outlives this app on purpose, so it
+  // is the one thing a restart does not put right, and it has to be asked about
+  // rather than assumed.
+  openSessions.freshenIfStale()
+    .then((did) => {
+      if (did) console.log("  restarted the conversation helper — it was running older code");
+      else if (openSessions.runningOldCode()) console.log("  the conversation helper is running OLDER CODE and would not restart");
+    })
+    .catch(() => {});
+
   const cleared = sweep({ say: (line) => console.log(line) });
   const handovers = sweepHandovers({ say: (line) => console.log(line) });
   if (cleared.swept.length || handovers.length) console.log("");

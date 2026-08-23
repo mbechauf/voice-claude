@@ -131,6 +131,30 @@ export function whatHasHappened() {
  * written work in it — a path, a bracket, a heading — is skipped rather than cleaned
  * up, because at a pause it is better to say nothing than to read punctuation aloud.
  */
+/**
+ * The last thing it said in its own words, out of the account of what has happened.
+ *
+ * This is where the good ones always came from. Everything readable that has ever been
+ * announced mid-job was a sentence Claude had already written in plain English — "the
+ * smoke test works, but about a fifth of replacements still slip, so I'll loop". The
+ * gibberish came from the other half of the account: tool names, arguments, and raw
+ * results, handed to a small model with instructions not to mention any of it. Told to
+ * describe machinery without naming machinery, it stitched unrelated numbers into
+ * confident sentences that were not true of anything.
+ *
+ * So its own words are used when there are any, and nothing is asked of any model. The
+ * summariser is now only for the case it is actually needed for: a long stretch of
+ * silent work with nothing said during it.
+ */
+export function itsOwnWords(notes) {
+  for (const line of [...(notes ?? [])].reverse()) {
+    if (!String(line).startsWith("Said: ")) continue;
+    const said = anUpdateWorthHearing(String(line).slice("Said: ".length));
+    if (said) return said;
+  }
+  return "";
+}
+
 export function anUpdateWorthHearing(text) {
   const whole = String(text ?? "").trim();
   if (!whole) return "";
@@ -265,6 +289,16 @@ async function askTheOpenSession({ project, opening, resume, emit }) {
     await openSessions.ask({ project, ask: opening, resume }, (message) => {
       if (job.stopped) return;
       const job_ = current;
+
+      if (message.kind === "notice") {
+        // The holder telling the person something was done to their conversation.
+        // Passed straight through, in its own words: this is not a step in answering
+        // the question and must not be rationed like one. It can also arrive after the
+        // answer is finished — the rebuild happens once nobody is waiting — which is
+        // why nothing here leans on the job that has by then been let go of.
+        emit("notice", String(message.text ?? ""));
+        return;
+      }
 
       if (message.kind === "conversation") {
         remember(project, message.id);
