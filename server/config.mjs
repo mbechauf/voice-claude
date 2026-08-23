@@ -34,6 +34,10 @@ export const PROJECTS = {
       "the voice project", "this app", "yourself",
     ],
   },
+  "the speech branch": {
+    at: path.join(CODE, "Advisor-LLM-Speech"),
+    alsoCalled: ["speech", "the speech", "speech branch", "the listening branch", "listening"],
+  },
   "the resume builder": {
     at: path.join(CODE, "resume_builder"),
     alsoCalled: ["resume", "the resume", "resume builder", "the cv builder"],
@@ -64,6 +68,7 @@ export const EVERY_PROJECT_NAME = Object.entries(PROJECTS)
 // more than one project could claim.
 const SAYS_NOTHING = new Set([
   "the", "my", "a", "an", "app", "apps", "application", "project", "code", "thing", "llm",
+  "branch",
 ]);
 
 const wordsUsedBy = Object.fromEntries(
