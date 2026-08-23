@@ -51,7 +51,8 @@ function show(started, conversations, handedOver) {
 try {
   const answer = await (await fetch(`https://127.0.0.1:${PORT}/running`)).json();
   show(answer.started ?? [], answer.conversations ?? [], answer.handedOver ?? []);
-  if (answer.answering) say(`It is answering a question right now.`);
+  const answering = Array.isArray(answer.answering) ? answer.answering : [];
+  if (answering.length) say(`Answering right now on ${answering.join(", ")}.`);
   if (answer.queued) say(`${answer.queued} typed question${answer.queued === 1 ? "" : "s"} waiting.`);
 } catch {
   // The app being down is not a reason to have no answer. What it wrote down is still

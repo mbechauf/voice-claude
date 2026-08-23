@@ -1599,6 +1599,18 @@ try {
   const cleared = await (await fetch(`${base}/never-mind`, { method: "POST" })).json();
   check("typed questions waiting their turn can be dropped", typeof cleared.dropped === "number");
 
+  // Being busy belongs to a project, not to the machine. Pinned as a shape rather
+  // than as behaviour — nothing is answering during a check, so all this can prove is
+  // that the answer names projects and can name more than one. That is the part that
+  // silently went back to a plain yes-or-no once, and took every other project's
+  // question down with it: one folder answering left every other screen waiting.
+  const running = await (await fetch(`${base}/running`)).json();
+  check(
+    "says which projects are answering, rather than only that something is",
+    Array.isArray(running.answering),
+    `got ${typeof running.answering}`,
+  );
+
   const watchingFeed = await (await fetch(`${base}/watching/since`)).json();
   check("tells a screen which projects there are", Array.isArray(watchingFeed.projects));
   check("tells a screen where the car is", Boolean(watchingFeed.driving));

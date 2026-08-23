@@ -192,6 +192,10 @@
       // other: nothing any of them does changes what the others are shown.
       let place = null;
       let chosen = null;
+      // Why the last question here stopped with nothing to show, held on screen until
+      // something new starts, because it is only worth saying while it is the reason
+      // the screen is empty.
+      let stoppedBecause = "";
       let shown = 0;
       let emptied = false;
       let quiet = false; // the last thing shown was a bare "thinking" marker
@@ -335,12 +339,19 @@
         // A typed question never barges in over an answer somebody is waiting on, so
         // it can sit for a while. Saying so is the difference between waiting and
         // wondering whether it was ignored.
-        queued.hidden = !seen.queued;
+        // And a question that stopped without an answer says so in the same place,
+        // until something new starts here. Going quiet looks exactly like broken.
+        if (seen.interrupted) stoppedBecause = seen.interrupted;
+        if (seen.working) stoppedBecause = "";
+
+        queued.hidden = !seen.queued && !stoppedBecause;
         if (seen.queued) {
           queued.textContent =
             seen.queued === 1
-              ? "one typed question waiting for the current answer to finish"
-              : `${seen.queued} typed questions waiting for the current answer to finish`;
+              ? "one typed question waiting for this project's answer to finish"
+              : `${seen.queued} typed questions waiting for this project's answer to finish`;
+        } else if (stoppedBecause) {
+          queued.textContent = stoppedBecause;
         }
 
         if (!chooser.options.length && Array.isArray(seen.projects)) {

@@ -30,7 +30,9 @@ import {
   VOICE_NAME,
   WHAT_EACH_DOES,
 } from "./config.mjs";
-import { forgetConversation, isBusy, itsOwnWords, startWork, stopWork, whatHasHappened } from "./claude-bridge.mjs";
+import {
+  forgetConversation, isBusy, itsOwnWords, startWork, stopWork, whatHasHappened, whyItStopped,
+} from "./claude-bridge.mjs";
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
 import * as openSessions from "./session-holder.mjs";
@@ -309,6 +311,10 @@ function broadcast(kind, text, how = "spoken") {
 // Typed questions waiting their turn. Only typed ones ever wait: a spoken question
 // takes over, exactly as it always has, because the person saying it is in a car and
 // has no way of knowing something else was already running.
+//
+// Waiting is per project. A question waits for the answer being written in ITS OWN
+// folder and for nothing else — sitting behind a project you are not even looking at
+// is the complaint this queue used to be the cause of rather than the cure for.
 const waiting = [];
 
 /**
@@ -354,17 +360,29 @@ async function put(request, how, { alreadyTidied = false, at = project } = {}) {
       // The moment this one is done, whatever was typed while it ran gets its turn.
       if (kind === "final" || kind === "error") setTimeout(takeTheNextOne, 0);
     },
-    { briefing: `${speakingRules}\n\n${boundary(at)}`, standing: whereYouAre(at), project: at },
+    {
+      briefing: `${speakingRules}\n\n${boundary(at)}`,
+      standing: whereYouAre(at),
+      project: at,
+      // So it knows whether anybody is listening to this one. Two answers can be
+      // written at once; only one can be read out loud.
+      spoken: how === "spoken",
+    },
   );
 }
 
 function takeTheNextOne() {
-  if (!waiting.length || isBusy()) return;
-  const next = waiting.shift();
-  // Carries its own project, so waiting its turn never moves it somewhere else.
-  put(next.request, "typed", { alreadyTidied: true, at: next.at }).catch((err) => {
-    note("a queued question went wrong", err.message);
-  });
+  // Every project whose turn is free, not just the front of the line: one project
+  // being busy is no reason for a question about another one to sit there.
+  for (let i = 0; i < waiting.length; i += 1) {
+    if (isBusy(waiting[i].at)) continue;
+    const [next] = waiting.splice(i, 1);
+    i -= 1;
+    // Carries its own project, so waiting its turn never moves it somewhere else.
+    put(next.request, "typed", { alreadyTidied: true, at: next.at }).catch((err) => {
+      note("a queued question went wrong", err.message);
+    });
+  }
 }
 
 // Looked at on a clock as well as when an answer finishes, because an answer does not
@@ -479,13 +497,16 @@ async function handle(req, res) {
       // Which project the car is on, so a screen looking at another one can say so
       // rather than leaving somebody to wonder why nothing is arriving.
       driving: nameOf(project),
-      working: isBusy(),
+      working: isBusy(where),
       // Said so a screen can show a typed question as waiting its turn rather than
       // as ignored. Silence between typing something and it starting reads as broken.
       // Named apart from the "nothing has been said here yet" note above it, because
       // one of them quietly overwriting the other is exactly the kind of fault that
       // shows up as a blank screen and no reason.
-      queued: waiting.length,
+      queued: waiting.filter((one) => one.at === where).length,
+      // Why the last question here stopped with nothing to show, if it did. Said once
+      // and then gone, so it is news rather than a permanent complaint.
+      interrupted: whyItStopped(where),
     });
   }
 
@@ -580,7 +601,7 @@ async function handle(req, res) {
   // account is emptied by the asking, so nothing is announced twice and each summary
   // covers exactly the stretch since the last one.
   if (url.pathname === "/so-far" && req.method === "POST") {
-    const notes = whatHasHappened();
+    const notes = whatHasHappened(project);
     if (!notes.length) return send(res, 200, { summary: "" });
     // Its own words first, and then no model at all. A sentence it wrote itself is
     // already true, already plain, and already in the right voice.
@@ -623,10 +644,13 @@ async function handle(req, res) {
     // Never over the top of an answer somebody is waiting on. Interrupting already
     // has a way to be asked for, out loud; a sentence typed in another room killing
     // a drive's answer would be a nasty surprise with no explanation attached.
-    if (isBusy()) {
+    if (isBusy(at)) {
       waiting.push({ request: request.trim(), at });
       note("typed, queued", `${nameOf(at)}: ${request.trim().slice(0, 70)}`);
-      return send(res, 202, { queued: waiting.length, project: nameOf(at) });
+      return send(res, 202, {
+        queued: waiting.filter((one) => one.at === at).length,
+        project: nameOf(at),
+      });
     }
 
     await put(request.trim(), "typed", { alreadyTidied: true, at });
@@ -700,7 +724,9 @@ async function handle(req, res) {
       // it and this app genuinely does not know them otherwise.
       conversations: open?.open ?? [],
       handedOver: handoversRunning(),
-      answering: isBusy(),
+      // Which projects, rather than whether: there can be more than one now, and a
+      // bare yes never said where.
+      answering: Object.values(PROJECTS).filter((one) => isBusy(one.at)).map((one) => nameOf(one.at)),
       queued: waiting.length,
     });
   }
@@ -723,7 +749,7 @@ async function handle(req, res) {
   }
 
   if (url.pathname === "/stop" && req.method === "POST") {
-    const stopped = stopWork();
+    const stopped = stopWork(project);
     console.log(stopped ? "  stopped" : "  nothing to stop");
     return send(res, 200, { stopped });
   }

@@ -110,10 +110,11 @@ function noteDown(job, line) {
  * asking. Whoever is going to say it out loud takes it, so two askers cannot both be
  * told the same thing and the same news cannot be announced twice.
  */
-export function whatHasHappened() {
-  if (!current) return [];
-  const taken = current.notes;
-  current.notes = [];
+export function whatHasHappened(project) {
+  const job = answering.get(project);
+  if (!job) return [];
+  const taken = job.notes;
+  job.notes = [];
   return taken;
 }
 
@@ -186,7 +187,61 @@ export function lostTheConversation(stderr = "") {
   );
 }
 
-let current = null;
+// What is being answered right now — one job per project, never one for the whole
+// machine.
+//
+// It used to be a single slot with nothing written on it: no note of whose question
+// it was. That is the whole of why a question about one project stood in the way of
+// every other one. A typed question waited behind an answer it had nothing to do
+// with, and a spoken question took the slot from whatever was running even when that
+// was a different folder. The conversations themselves were never shared — the helper
+// has kept one per project all along — so being busy was the only thing that ever was.
+//
+// Two questions on the SAME project still take turns. That is not decided here but
+// where the conversation actually lives, in the helper, because that is the only
+// place that can see both of them at once.
+const answering = new Map();          // project folder -> the job answering there
+
+function nowAnswering(project, job, spoken) {
+  job.project = project;
+  job.spoken = spoken;
+  answering.set(project, job);
+}
+
+/**
+ * End anything being answered OUT LOUD somewhere else.
+ *
+ * Two answers can now be written at the same time, but only one can be read out:
+ * there is one car and one person in it. So asking out loud ends any spoken answer
+ * still running on another project — which is what switching project mid-answer used
+ * to do to absolutely everything, and is right for exactly this one case. Typed work
+ * elsewhere is left alone, because nobody is listening to it.
+ */
+// Why a question stopped without an answer, kept until whoever was waiting has been
+// told. A screen that simply goes quiet is indistinguishable from one that is broken,
+// and the person who typed the question is not in the car and cannot hear what
+// happened instead.
+const interrupted = new Map();        // project folder -> one sentence
+
+/** Said once, then forgotten: told twice, it reads as it happening twice. */
+export function whyItStopped(project) {
+  const said = interrupted.get(project) ?? "";
+  interrupted.delete(project);
+  return said;
+}
+
+function stopSpeakingElsewhere(project) {
+  for (const [where, job] of answering) {
+    if (where !== project && job.spoken) stopWork(where);
+  }
+}
+
+// Cleared only if it is still the job that is there. One that was replaced must not
+// wipe the record belonging to the one that replaced it — that is how a project ends
+// up looking idle while it is still working.
+function noLonger(job) {
+  if (job && answering.get(job.project) === job) answering.delete(job.project);
+}
 
 // The conversation Claude is having with us, carried across questions so that
 // "explain that" and "next" mean something, and so the project context is loaded
@@ -196,8 +251,13 @@ let current = null;
 // in the file that keeps it. A variable dies with the app, and this app restarts
 // several times an hour.
 
-export function isBusy() {
-  return current !== null;
+/**
+ * Is a question being answered? On one project when told which, anywhere at all when
+ * not — and "anywhere" is only ever the right question for something that affects the
+ * whole machine, such as restarting the app out from under somebody mid-answer.
+ */
+export function isBusy(project) {
+  return project === undefined ? answering.size > 0 : answering.has(project);
 }
 
 /** Start over on purpose. This project only; the others keep what they had. */
@@ -209,16 +269,24 @@ export function forgetConversation(project = STARTING_PROJECT) {
   openSessions.forget(project).catch(() => {});
 }
 
-export function stopWork() {
-  if (!current) return false;
+export function stopWork(project) {
+  return Boolean(endWork(project));
+}
+
+// The same thing, but handing back what it stopped, so a caller that needs to know
+// whether anybody was waiting on it can find out. Not exported: what it hands back
+// holds a running process, and that is nobody else's to hold.
+function endWork(project) {
+  const job = answering.get(project);
+  if (!job) return null;
   // Two roads, two ways to stop. The old one is a process of its own and killing it
   // is the whole of it. The open session is a conversation we mean to keep, so
   // stopping means letting go of this answer rather than taking the session down with
   // it — killing that would cost the drive to save a sentence.
-  if (current.open) current.open.stopped = true;
-  else current.child.kill("SIGTERM");
-  current = null;
-  return true;
+  if (job.open) job.open.stopped = true;
+  else job.child.kill("SIGTERM");
+  noLonger(job);
+  return job;
 }
 
 /**
@@ -232,8 +300,18 @@ export function stopWork() {
  * `standing` is the one thing that cannot be said once: which project we are on. It
  * rides along with every later question instead.
  */
-export function startWork(request, emit, { briefing = "", standing = "", project = STARTING_PROJECT } = {}) {
-  if (current) stopWork();
+export function startWork(
+  request,
+  emit,
+  { briefing = "", standing = "", project = STARTING_PROJECT, spoken = false } = {},
+) {
+  // Only this project's. Taking over the answer somebody is waiting on in a different
+  // folder is exactly the fault this is here to prevent.
+  const replaced = endWork(project);
+  if (spoken && replaced && !replaced.spoken) {
+    interrupted.set(project, "A question asked out loud took over, so this one stopped without an answer.");
+  }
+  if (spoken) stopSpeakingElsewhere(project);
 
   let kept = recall(project);
 
@@ -264,10 +342,13 @@ export function startWork(request, emit, { briefing = "", standing = "", project
   // the old way stays exactly where it was: this is a faster road to the same place,
   // not a replacement, and a road that is out has to put you back on the old one
   // rather than leave you standing.
-  askTheOpenSession({ project, opening, resume: kept?.id ?? null, emit })
+  askTheOpenSession({ project, opening, resume: kept?.id ?? null, emit, spoken })
     .then((handled) => {
       if (handled) return;
-      launch({ request, emit, briefing, standing, project, resume: kept?.id ?? null, alreadyRetried: false });
+      launch({
+        request, emit, briefing, standing, project, spoken,
+        resume: kept?.id ?? null, alreadyRetried: false,
+      });
     });
 }
 
@@ -276,11 +357,12 @@ export function startWork(request, emit, { briefing = "", standing = "", project
  * it to. Resolves true when it was answered there, false when the caller should go
  * the old way — never rejects, because a failure here is not the driver's problem.
  */
-async function askTheOpenSession({ project, opening, resume, emit }) {
+async function askTheOpenSession({ project, opening, resume, emit, spoken = false }) {
   if (!openSessions.isInstalled() || process.env.VOICE_CLAUDE_OPEN_SESSION === "off") return false;
 
   const job = { stopped: false };
-  current = { child: null, lastPhrase: null, notes: [], open: job };
+  const mine = { child: null, lastPhrase: null, notes: [], open: job };
+  nowAnswering(project, mine, spoken);
 
   try {
     if (!(await openSessions.startIfNeeded())) return giveUp(job);
@@ -288,7 +370,7 @@ async function askTheOpenSession({ project, opening, resume, emit }) {
     let finalText = "";
     await openSessions.ask({ project, ask: opening, resume }, (message) => {
       if (job.stopped) return;
-      const job_ = current;
+      const job_ = mine;
 
       if (message.kind === "notice") {
         // The holder telling the person something was done to their conversation.
@@ -324,7 +406,7 @@ async function askTheOpenSession({ project, opening, resume, emit }) {
     });
 
     if (job.stopped) return true;                 // stopped on purpose; nothing to say
-    current = null;
+    noLonger(mine);
     if (!finalText.trim()) {
       emit("error", "It finished but didn't come back with anything.");
       return true;
@@ -334,14 +416,14 @@ async function askTheOpenSession({ project, opening, resume, emit }) {
   } catch (err) {
     if (job.stopped) return true;
     console.error(`open session: ${err.message}`);
-    return giveUp(job);
+    return giveUp(job, mine);
   }
 }
 
 // Hand the question back to the old way, and leave nothing of this attempt behind.
-function giveUp(job) {
+function giveUp(job, mine) {
   if (job.stopped) return true;
-  current = null;
+  noLonger(mine);
   return false;
 }
 
@@ -360,7 +442,7 @@ export function openingFor({ request, briefing = "", standing = "", resume = nul
     .join("\n\n");
 }
 
-function launch({ request, emit, briefing, standing, project, resume, alreadyRetried }) {
+function launch({ request, emit, briefing, standing, project, resume, alreadyRetried, spoken = false }) {
   const opening = openingFor({ request, briefing, standing, resume });
 
   const args = [
@@ -406,13 +488,13 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
   });
 
   const job = { child, lastPhrase: null, notes: [] };
-  current = job;
+  nowAnswering(project, job, spoken);
 
   const timer = setTimeout(() => {
-    if (current === job) {
+    if (answering.get(project) === job) {
       child.kill("SIGTERM");
       emit("error", "That took too long and I stopped it.");
-      current = null;
+      noLonger(job);
     }
   }, WORK_TIMEOUT_MS);
 
@@ -492,8 +574,8 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
 
   child.on("close", (code) => {
     clearTimeout(timer);
-    if (current !== job) return; // superseded or stopped on purpose
-    current = null;
+    if (answering.get(project) !== job) return; // superseded or stopped on purpose
+    noLonger(job);
 
     if (code === 0 && finalText.trim()) {
       emit("final", finalText.trim());
@@ -505,7 +587,7 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
       // and the person should hear why the answer arrives without any history behind it.
       forget(project);
       emit("progress", "I couldn't pick up our old conversation, so I'm starting fresh");
-      launch({ request, emit, briefing, standing, project, resume: null, alreadyRetried: true });
+      launch({ request, emit, briefing, standing, project, spoken, resume: null, alreadyRetried: true });
     } else {
       const hint = stderr.trim().split("\n").pop() ?? "";
       emit("error", `Something went wrong on my machine. ${hint}`.trim());
@@ -514,7 +596,7 @@ function launch({ request, emit, briefing, standing, project, resume, alreadyRet
 
   child.on("error", (err) => {
     clearTimeout(timer);
-    if (current === job) current = null;
+    noLonger(job);
     emit("error", `I couldn't start the work. ${err.message}`);
   });
 }
