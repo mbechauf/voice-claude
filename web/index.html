@@ -461,7 +461,17 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         // an hour; the browser knew the answer the whole time and was never asked.
         const named = err?.name ? ` (${err.name})` : "";
         trace("the microphone was refused", `${err?.name ?? "no reason given"}: ${err?.message ?? ""}`);
-        onDeaf?.(`the phone wouldn't give this page the microphone${named}`);
+        // A flat no is final and there is nothing a tap will do about it. Anything else
+        // is worth trying again the moment a finger touches the screen, because a
+        // finger is the one thing a phone insists on before it will hand over a
+        // microphone, and this app starts itself without one on purpose.
+        const finalNo = err?.name === "NotAllowedError" || err?.name === "SecurityError";
+        onDeaf?.(
+          finalNo
+            ? `the phone wouldn't give this page the microphone${named}`
+            : `the Mac's ear needs a tap first${named}`,
+          !finalNo,
+        );
         return;
       }
       if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -2764,7 +2774,7 @@ function splitFrontEnd() {
         // Nothing arriving from the microphone at all. Falls back to the phone's own
         // dictation, which needs no help from this Mac, and says so out loud — silence
         // that repairs itself invisibly is how you end up not trusting either.
-        onDeaf: (why) => {
+        onDeaf: (why, worthAnotherGo) => {
           if (!onTheMac) return;
           try { ears?.stop(); } catch {}
           // Which of the two it was, because they have completely different cures and
@@ -2772,6 +2782,26 @@ function splitFrontEnd() {
           log(`${why ?? "the Mac couldn't hear"}, so I'm listening on the phone instead`, "bad");
           ears = startEars(false);
           ears?.start();
+
+          // A phone will not hand a page the microphone unless a finger asked for it,
+          // and this app deliberately starts itself without one — at seventy miles an
+          // hour, needing a tap to get going again after a restart is worse than any
+          // ear. Both of those are right, and together they mean the better ear can
+          // never start by itself on the first load.
+          //
+          // So it falls back at once, which is what keeps somebody able to talk, and
+          // then waits for the next touch of the screen — whatever that touch was for
+          // — and quietly upgrades. Nobody has to know that is what the tap did.
+          if (!worthAnotherGo) return;
+          setState("tap the screen once and the Mac can do the hearing");
+          const onTouch = () => {
+            document.removeEventListener("pointerdown", onTouch);
+            trace("a tap arrived", "trying the Mac's ear again");
+            try { ears?.stop(); } catch {}
+            ears = startEars(true);
+            ears?.start();
+          };
+          document.addEventListener("pointerdown", onTouch, { once: true });
         },
         onHeard: heard,
         onHearing: (text) => {
