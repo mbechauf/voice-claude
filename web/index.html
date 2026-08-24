@@ -406,7 +406,17 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
         });
       } catch {
-        onTrouble("The phone won't give this page the microphone. Allow it in Safari's settings for this site.");
+        // Refused. This is not a fault to report and stop at — it is the commonest way
+        // the new ear fails, and it leaves somebody driving with no way to talk at all.
+        //
+        // It is usually not about permission either. Safari will not hand the
+        // microphone to a page whose certificate it warned about, however many times
+        // the warning was accepted, so opening the app by its address rather than by
+        // its full name refuses the microphone and says nothing about certificates.
+        // The phone's own dictation is unaffected by any of that, which is exactly why
+        // it is the thing to fall back to.
+        trace("the microphone was refused", "handing back to the phone");
+        onDeaf?.();
         return;
       }
       if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
