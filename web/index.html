@@ -395,6 +395,46 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
     busy = false;
   }
 
+  /**
+   * Ask the phone for the microphone, and do not take a fumble for a no.
+   *
+   * There are two completely different refusals and they were being treated the same.
+   * "You said no" is final and arguing with it is rude. But a phone also refuses when
+   * the page is not in a state where it is allowed to ask at all — being hidden, or
+   * still settling after a reload, or in the middle of being replaced. That is not a
+   * decision, it is a moment, and the cure for a moment is to wait and ask again.
+   *
+   * So a flat no is taken as a no, and anything else is retried a few times, after
+   * waiting for the page to actually be in front of somebody. A page that cannot ask
+   * because nobody is looking at it will be able to the second they are.
+   */
+  async function askForTheMicrophone(tries = 4) {
+    const wants = { audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } };
+    let last = null;
+    for (let go = 0; go < tries; go += 1) {
+      if (!wanted) throw new Error("no longer listening");
+      if (document.visibilityState !== "visible") {
+        trace("waiting for the page to be in front", `try ${go + 1}`);
+        await new Promise((done) => {
+          const seen = () => { document.removeEventListener("visibilitychange", seen); done(); };
+          document.addEventListener("visibilitychange", seen);
+          setTimeout(seen, 5_000);
+        });
+      }
+      try {
+        return await navigator.mediaDevices.getUserMedia(wants);
+      } catch (err) {
+        last = err;
+        // A person saying no is not a fumble, and asking again is how a permission
+        // prompt turns into pestering.
+        if (err?.name === "NotAllowedError" || err?.name === "SecurityError") throw err;
+        trace("the microphone was not ready", `${err?.name ?? "?"} — trying again`);
+        await new Promise((r) => setTimeout(r, 400 * (go + 1)));
+      }
+    }
+    throw last ?? new Error("no microphone");
+  }
+
   return {
     async start() {
       wanted = true;
@@ -402,9 +442,7 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         // Echo cancellation matters more here than it ever did: this ear will happily
         // write down the Mac's own voice coming back off the windscreen, because it has
         // no idea any of the sound is its own.
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-        });
+        stream = await askForTheMicrophone();
       } catch (err) {
         // Refused. This is not a fault to report and stop at — it is the commonest way
         // the new ear fails, and it leaves somebody driving with no way to talk at all.
