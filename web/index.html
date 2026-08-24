@@ -2499,10 +2499,19 @@ function splitFrontEnd() {
   // working note uses, a pitch above it, and stays out of the way of everything
   // else — it never lands over its own voice, over a question it has asked, or
   // while there are words on the screen waiting to be sent.
+  //
+  // It waits a long time before the first one, and that is the whole of what makes it
+  // bearable. Quiet ten seconds after an answer is not a silence anybody could mistake
+  // for a fault — it is the ordinary gap between one thing and the next, and a note
+  // there is an interruption dressed up as reassurance. The silence worth breaking is
+  // the one that has gone on long enough to make you wonder, and that takes minutes,
+  // not seconds. Afterwards it repeats slowly, because by then the question is "are
+  // you still there" and that only needs answering now and again.
   let waitingTick = null;
+  let waitingFirst = null;
   function waitingForYou() {
-    clearInterval(waitingTick);
-    waitingTick = setInterval(() => {
+    stopWaitingNote();
+    const note = () => {
       // Guarded here as well as stopped on the way in, because anything that settles the
       // screen starts this clock again — so stopping it once was not enough and the note
       // came back a few seconds after being paused.
@@ -2510,10 +2519,16 @@ function splitFrontEnd() {
       if (working || waitingOn || mouth?.busy) return;
       if (question.length || live || reader.held()) return;
       sound.note("waiting");
-    }, 10_000);
+    };
+    waitingFirst = setTimeout(() => {
+      note();
+      waitingTick = setInterval(note, setup.waitingNoteEvery ?? 30_000);
+    }, setup.waitingNoteAfter ?? 180_000);
   }
   function stopWaitingNote() {
+    clearTimeout(waitingFirst);
     clearInterval(waitingTick);
+    waitingFirst = null;
     waitingTick = null;
   }
 

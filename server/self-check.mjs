@@ -1360,9 +1360,10 @@ async function checkTheCertificate() {
   // what changed underneath these, turning six passing checks into six failures with
   // nothing wrong in the app at all. A check whose result depends on the weather is
   // not a check.
-  // A stub that refuses, rather than a path that does not exist: a missing path is
-  // simply skipped and the real one two lines further down gets used instead, which is
-  // how this looked fixed and was not.
+  //
+  // A stub that refuses, rather than a path that does not exist: a missing one is
+  // simply skipped and the real command two lines further down gets used instead,
+  // which is how this looked fixed and was not.
   process.env.VOICE_CLAUDE_TAILSCALE = madeUpTailscale("#!/bin/sh\nexit 1\n");
 
   // One it signs itself, which is what anybody without Tailscale gets.
