@@ -405,7 +405,7 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
         });
-      } catch {
+      } catch (err) {
         // Refused. This is not a fault to report and stop at — it is the commonest way
         // the new ear fails, and it leaves somebody driving with no way to talk at all.
         //
@@ -415,8 +415,15 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         // its full name refuses the microphone and says nothing about certificates.
         // The phone's own dictation is unaffected by any of that, which is exactly why
         // it is the thing to fall back to.
-        trace("the microphone was refused", "handing back to the phone");
-        onDeaf?.("the phone wouldn't give this page the microphone");
+        // The browser's own word for what went wrong, said out loud rather than
+        // swallowed. There are at least four completely different reasons a phone
+        // refuses — the person said no, the page is not trusted, something else has
+        // the microphone, or this kind of page is not allowed one at all — and they
+        // have four different cures. Guessing between them from the driver's seat cost
+        // an hour; the browser knew the answer the whole time and was never asked.
+        const named = err?.name ? ` (${err.name})` : "";
+        trace("the microphone was refused", `${err?.name ?? "no reason given"}: ${err?.message ?? ""}`);
+        onDeaf?.(`the phone wouldn't give this page the microphone${named}`);
         return;
       }
       if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
