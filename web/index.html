@@ -2764,18 +2764,27 @@ function splitFrontEnd() {
       // Which ear, and a way back from the new one. Trying a different ear on somebody
       // who is driving is only defensible if it cannot leave them unable to talk, so
       // the choice is made once here and undone automatically if it does not work.
+      // Which ear is the one in use, so an ear that has been replaced cannot pull the
+      // rug out from under the one that replaced it. That is not hypothetical: the
+      // first ear gives up slowly, over several tries, and by the time it finally says
+      // so a tap may already have started a better one. Its late complaint was tearing
+      // that down and handing back — which looked exactly like the tap not working.
+      let earsInUse = 0;
       const startEars = (onTheMac) => {
+        const mine = ++earsInUse;
         trace("ear", onTheMac ? "the Mac is hearing" : "the phone is hearing");
-        const made = (onTheMac ? macEars : deviceEars)(earRules(onTheMac));
+        const made = (onTheMac ? macEars : deviceEars)(earRules(onTheMac, () => mine === earsInUse));
         if (!made && onTheMac) return startEars(false);
         return made;
       };
-      const earRules = (onTheMac) => ({
+      const earRules = (onTheMac, stillTheOne = () => true) => ({
         // Nothing arriving from the microphone at all. Falls back to the phone's own
         // dictation, which needs no help from this Mac, and says so out loud — silence
         // that repairs itself invisibly is how you end up not trusting either.
         onDeaf: (why, worthAnotherGo) => {
           if (!onTheMac) return;
+          // A complaint from an ear nobody is listening through any more.
+          if (!stillTheOne()) { trace("a replaced ear reported in", why ?? ""); return; }
           try { ears?.stop(); } catch {}
           // Which of the two it was, because they have completely different cures and
           // one message for both sent somebody looking in the wrong place.
