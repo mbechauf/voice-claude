@@ -287,7 +287,7 @@ function listenForResults(handle) {
  * Taken from the advisor's speech branch, where it was built and driven with, rather
  * than written again from the description of it.
  */
-function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound }) {
+function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDeaf }) {
   if (!navigator.mediaDevices?.getUserMedia) return null;
 
   const WANT_RATE = 16000;          // what the ear expects, and all it accepts
@@ -299,8 +299,10 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound }) {
   let floor = 0.01;                  // the room's own quiet, learned continuously
   const waiting = [];
   let busy = false;
+  let anySoundAtAll = false;         // has the microphone ever actually delivered anything
 
   function heardIt(ev) {
+    anySoundAtAll = true;
     const data = ev.inputBuffer.getChannelData(0);
     let sum = 0;
     for (let i = 0; i < data.length; i += 1) sum += data[i] * data[i];
@@ -409,6 +411,10 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound }) {
       }
       if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
       ctx = new (window.AudioContext ?? window.webkitAudioContext)();
+      // A phone starts this asleep unless a finger woke it, and asleep it delivers no
+      // sound at all — silently, with everything looking connected. Asking it to wake
+      // costs nothing when it was already awake.
+      try { if (ctx.state === "suspended") await ctx.resume(); } catch {}
       source = ctx.createMediaStreamSource(stream);
       node = ctx.createScriptProcessor(4096, 1, 1);
       node.onaudioprocess = heardIt;
@@ -417,6 +423,18 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound }) {
       speaking = false;
       piece = [];
       trace("listening", "the Mac is doing the hearing");
+
+      // An ear that never hears anything is not an ear, and from the driver's seat it
+      // is indistinguishable from the app being broken — which is exactly what it was.
+      // So it is given a few seconds to deliver any sound at all, and if none arrives
+      // it hands back to the one that was working before rather than leaving somebody
+      // talking to a page that cannot hear. This is the only honest way to try a new
+      // ear on somebody who is driving.
+      setTimeout(() => {
+        if (!wanted || anySoundAtAll) return;
+        trace("the Mac's ear delivered nothing", "handing back to the phone");
+        onDeaf?.();
+      }, 5_000);
     },
     stop() {
       wanted = false;
@@ -2678,9 +2696,26 @@ function splitFrontEnd() {
       // Which ear. The Mac's when it is there, the phone's own when it is not — and
       // saying so in the trace, because "it did not hear me" is the same complaint
       // either way and the two have very different causes.
-      const makeEars = setup.earOnTheMac ? macEars : deviceEars;
-      trace("ear", setup.earOnTheMac ? "the Mac is hearing" : "the phone is hearing");
-      ears = makeEars({
+      // Which ear, and a way back from the new one. Trying a different ear on somebody
+      // who is driving is only defensible if it cannot leave them unable to talk, so
+      // the choice is made once here and undone automatically if it does not work.
+      const startEars = (onTheMac) => {
+        trace("ear", onTheMac ? "the Mac is hearing" : "the phone is hearing");
+        const made = (onTheMac ? macEars : deviceEars)(earRules(onTheMac));
+        if (!made && onTheMac) return startEars(false);
+        return made;
+      };
+      const earRules = (onTheMac) => ({
+        // Nothing arriving from the microphone at all. Falls back to the phone's own
+        // dictation, which needs no help from this Mac, and says so out loud — silence
+        // that repairs itself invisibly is how you end up not trusting either.
+        onDeaf: () => {
+          if (!onTheMac) return;
+          try { ears?.stop(); } catch {}
+          log("the Mac couldn't hear anything, so I'm listening on the phone instead", "bad");
+          ears = startEars(false);
+          ears?.start();
+        },
         onHeard: heard,
         onHearing: (text) => {
           // Not shown while it is talking, because it is not being kept either. Watching
@@ -2710,6 +2745,8 @@ function splitFrontEnd() {
         },
         onTrouble: (message) => log(message, "bad"),
       });
+
+      ears = startEars(Boolean(setup.earOnTheMac));
       if (!ears) throw new Error("This browser has no built-in dictation. Use Safari on the phone.");
 
       questionInProgress = () => asTidied();
