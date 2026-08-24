@@ -549,7 +549,13 @@ async function handle(req, res) {
       // Who does the hearing. Decided here rather than on the phone, because this is
       // the machine that knows whether the ear is installed at all — and it can change
       // between one drive and the next without the phone being told anything new.
-      earOnTheMac: ear.isInstalled() && process.env.VOICE_CLAUDE_EAR !== "off",
+      //
+      // Off unless asked for, and that is not caution for its own sake. A half-working
+      // ear is worse than the old one in a specific way: it announces its failure on
+      // every page load, in red, to somebody driving who cannot do anything about it.
+      // Until it starts reliably it stays behind a switch, so trying it is a decision
+      // somebody makes while parked rather than something that happens to them.
+      earOnTheMac: ear.isInstalled() && process.env.VOICE_CLAUDE_EAR === "on",
       whatEachDoes: WHAT_EACH_DOES,
       answers: ANSWERS,
       answerWindow: ANSWER_WINDOW_MS,

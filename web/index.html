@@ -2807,8 +2807,14 @@ function splitFrontEnd() {
             document.removeEventListener("pointerdown", onTouch);
             trace("a tap arrived", "trying the Mac's ear again");
             try { ears?.stop(); } catch {}
-            ears = startEars(true);
-            ears?.start();
+            // A moment between letting go of the microphone and asking for it. The
+            // phone's own dictation does not hand it back the instant it is told to
+            // stop, and asking while it still holds it is refused — which is
+            // indistinguishable from the tap having been ignored.
+            setTimeout(() => {
+              ears = startEars(true);
+              ears?.start();
+            }, 600);
           };
           document.addEventListener("pointerdown", onTouch, { once: true });
         },
