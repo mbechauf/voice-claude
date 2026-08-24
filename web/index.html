@@ -416,7 +416,7 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         // The phone's own dictation is unaffected by any of that, which is exactly why
         // it is the thing to fall back to.
         trace("the microphone was refused", "handing back to the phone");
-        onDeaf?.();
+        onDeaf?.("the phone wouldn't give this page the microphone");
         return;
       }
       if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -443,7 +443,7 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
       setTimeout(() => {
         if (!wanted || anySoundAtAll) return;
         trace("the Mac's ear delivered nothing", "handing back to the phone");
-        onDeaf?.();
+        onDeaf?.("the Mac heard nothing at all");
       }, 5_000);
     },
     stop() {
@@ -2719,10 +2719,12 @@ function splitFrontEnd() {
         // Nothing arriving from the microphone at all. Falls back to the phone's own
         // dictation, which needs no help from this Mac, and says so out loud — silence
         // that repairs itself invisibly is how you end up not trusting either.
-        onDeaf: () => {
+        onDeaf: (why) => {
           if (!onTheMac) return;
           try { ears?.stop(); } catch {}
-          log("the Mac couldn't hear anything, so I'm listening on the phone instead", "bad");
+          // Which of the two it was, because they have completely different cures and
+          // one message for both sent somebody looking in the wrong place.
+          log(`${why ?? "the Mac couldn't hear"}, so I'm listening on the phone instead`, "bad");
           ears = startEars(false);
           ears?.start();
         },
