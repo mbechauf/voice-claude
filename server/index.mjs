@@ -35,6 +35,7 @@ import {
 } from "./claude-bridge.mjs";
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
+import * as ear from "./ear.mjs";
 import * as openSessions from "./session-holder.mjs";
 import {
   ACROSS_RESTARTS,
@@ -412,6 +413,28 @@ function readBody(req) {
   });
 }
 
+/**
+ * The body as it arrived, unread. Sound, not words — every browser compresses
+ * differently, so the page sends plain samples and nothing here interprets them.
+ *
+ * Capped, because a body with no end to it is the one request that can take a server
+ * down without anybody meaning any harm. Ten minutes of speech is far past anything a
+ * pause could ever produce.
+ */
+function readSound(req, most = 20 * 1024 * 1024) {
+  return new Promise((resolve) => {
+    const pieces = [];
+    let size = 0;
+    req.on("data", (piece) => {
+      size += piece.length;
+      if (size > most) { pieces.length = 0; req.destroy(); resolve(null); return; }
+      pieces.push(piece);
+    });
+    req.on("end", () => resolve(pieces.length ? Buffer.concat(pieces) : null));
+    req.on("error", () => resolve(null));
+  });
+}
+
 function send(res, status, body, type = "application/json") {
   res.writeHead(status, { "content-type": type, "access-control-allow-origin": "*" });
   res.end(typeof body === "string" ? body : JSON.stringify(body));
@@ -523,6 +546,10 @@ async function handle(req, res) {
       gate: GATE,
       pause: PAUSE_MS,
       phrases: PHRASES,
+      // Who does the hearing. Decided here rather than on the phone, because this is
+      // the machine that knows whether the ear is installed at all — and it can change
+      // between one drive and the next without the phone being told anything new.
+      earOnTheMac: ear.isInstalled() && process.env.VOICE_CLAUDE_EAR !== "off",
       whatEachDoes: WHAT_EACH_DOES,
       answers: ANSWERS,
       answerWindow: ANSWER_WINDOW_MS,
@@ -583,6 +610,22 @@ async function handle(req, res) {
     if (tidied.changed) note("tidied up a piece", `"${heard}" → "${tidied.text}"`);
     else if (tidied.why) note("kept a piece as heard", tidied.why);
     return send(res, 200, { text: tidied.text, changed: tidied.changed, why: tidied.why ?? "" });
+  }
+
+  // A piece of speech, heard here rather than on the phone. The sound arrives as plain
+  // samples and leaves as words; nothing is kept.
+  //
+  // The phone cannot reach the ear itself, and that is deliberate: the ear listens only
+  // to this machine, and the app is the one door that is already locked and already
+  // knows who is on the other side of it.
+  if (url.pathname === "/heard" && req.method === "POST") {
+    const sound = await readSound(req);
+    if (!sound) return send(res, 400, { error: "no sound" });
+    const words = await ear.hear(sound);
+    // Nothing heard is not a failure. A cough, a lorry going past, or a false start
+    // all come to this, and the page treats it as nothing said.
+    if (words) note("heard", words);
+    return send(res, 200, { text: words });
   }
 
   // Asked at a pause: has he stopped, or is he mid-thought? The phone can already see
@@ -849,13 +892,16 @@ server.listen(PORT, () => {
     const tidying = tidyUpInstalled()
       ? "a small model on this Mac"
       : `not installed — run "npm run cleanup:install"`;
-    console.log(`Hearing:     the phone's own dictation`);
+    console.log(`Hearing:     ${ear.isInstalled() ? "this Mac's own ear, with the phone's dictation to fall back on" : "the phone's own dictation"}`);
     console.log(`Tidying up:  ${tidying}`);
     console.log(`Speaking:    ${mouth}`);
     console.log(`Cost:        nothing beyond the Claude subscription.`);
     // Loading these takes a few seconds. Do it now, not when someone is waiting.
     if (speaker === "mac") warmUp();
     warmUpTidyUp();
+    // The model takes a few seconds to load. Paid now, while nobody is waiting, rather
+    // than by the first thing said on the first drive.
+    ear.warmUp();
   }
   for (const line of aboutTheCertificate) console.log(line);
 

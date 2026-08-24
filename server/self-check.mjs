@@ -572,6 +572,38 @@ function checkFinishedThoughts() {
   }
 }
 
+// Turning what the microphone gave us into what the ear accepts. This is the one piece
+// of real arithmetic in the hearing, it runs on every piece of speech, and getting it
+// wrong does not fail — it produces sound at the wrong speed, which comes back as
+// confident nonsense rather than as an error.
+function checkTheSoundItSends() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const source = page.match(/function asPlainSound[\s\S]*?\n  }/);
+  if (!source) {
+    check("the page can be read for how it prepares sound", false);
+    return;
+  }
+  const asPlainSound = new Function(`const WANT_RATE = 16000; ${source[0]}; return asPlainSound;`)();
+
+  // A second of sound at the rate a phone actually records at, which is never the rate
+  // the ear wants.
+  const from = 48000;
+  const samples = new Float32Array(from);
+  for (let i = 0; i < from; i += 1) samples[i] = Math.sin((i / from) * 2 * Math.PI * 440);
+  const sent = asPlainSound(samples, from);
+  check("a second of sound becomes a second of sound at the rate the ear wants",
+    sent.byteLength === 16000 * 2, `${sent.byteLength} bytes`);
+
+  // Two bytes per sample, smallest end first, and never wrapping round at the loud end
+  // — a sample that wraps is a click, and a run of them is a rasp over everything.
+  const loud = new Float32Array([1, -1, 2, -2, 0]);
+  const clipped = new Int16Array(asPlainSound(loud, 16000));
+  check("the loudest sound stays the loudest sound rather than wrapping round",
+    clipped[0] === 32767 && clipped[1] === -32768 && clipped[2] === 32767 && clipped[3] === -32768,
+    `${Array.from(clipped).join(", ")}`);
+  check("and silence stays silent", clipped[4] === 0);
+}
+
 function checkPickingAProject(names) {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
   const source = page.match(/  function projectAtTheFront[\s\S]*?\n  }/);
@@ -1472,6 +1504,25 @@ try {
   const fresh = await fetch(`${base}/new`, { method: "POST" });
   check("can start the drive over", fresh.ok);
 
+  // Sound in, words out. The ear itself may not be installed on every machine, and
+  // that is the point of the check: the road has to answer either way, because nothing
+  // heard and no ear at all must both come back as "nothing said" rather than as an
+  // error somebody in a car has to make sense of.
+  const quiet = Buffer.alloc(16000 * 2);   // one second of silence, as the page sends it
+  const heard = await fetch(`${base}/heard`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: quiet,
+  });
+  const words = heard.ok ? await heard.json() : null;
+  check("sound sent to the Mac comes back as words", heard.ok && typeof words?.text === "string",
+    `got ${heard.status}`);
+  check("and silence comes back as nothing said, not as a failure", (words?.text ?? "x") === "");
+
+  const noSound = await fetch(`${base}/heard`, { method: "POST", body: "" });
+  check("with no sound at all it says so rather than guessing", noSound.status === 400,
+    `got ${noSound.status}`);
+
   const empty = await fetch(`${base}/ask`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1578,6 +1629,7 @@ try {
   checkTheScreenCanDrawIt();
   checkAnswersGoBackTheWayTheyCame();
   await checkOneVoice();
+  checkTheSoundItSends();
 
   const watchingPage = await (await fetch(`${base}/watching`)).text();
   check("serves the page a screen watches from", watchingPage.includes("/watching/since"));

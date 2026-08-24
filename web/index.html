@@ -262,6 +262,174 @@ function listenForResults(handle) {
 // come back. It stops listening on its own after a pause, so we start it again;
 // nothing here may ever need a tap at seventy miles an hour.
 
+/**
+ * The Mac's ear: the phone stops recognising and starts sending sound.
+ *
+ * Same shape as the phone's own ear next door, on purpose — start it, stop it, and it
+ * calls back with what was heard. Nothing else in this page knows which one is in use,
+ * which is what makes swapping them a choice rather than surgery.
+ *
+ * Three things are genuinely different, and they are the whole of what to understand:
+ *
+ *   THIS PAGE OWNS THE CLOCK. The phone's dictation decided for itself when a piece of
+ *   speech ended. Here, loudness is measured against the room's own quiet — which is
+ *   itself measured continuously while nobody is speaking, so a car and a study both
+ *   work with no setting anywhere — and a pause ends the piece.
+ *
+ *   THERE ARE NO HALF-HEARD WORDS. Nothing exists until the pause, so there is nothing
+ *   to show on the screen as you speak and nothing to act on early. What that costs is
+ *   said where it is paid, below.
+ *
+ *   PLAIN SOUND, CONVERTED HERE. Every browser compresses differently and the Mac has
+ *   no audio tooling to undo that, so what goes over is uncompressed samples at the
+ *   rate the ear expects.
+ *
+ * Taken from the advisor's speech branch, where it was built and driven with, rather
+ * than written again from the description of it.
+ */
+function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound }) {
+  if (!navigator.mediaDevices?.getUserMedia) return null;
+
+  const WANT_RATE = 16000;          // what the ear expects, and all it accepts
+  const QUIET_ENDS_A_PIECE_MS = 700; // a pause this long means you have finished a piece
+  const MIN_PIECE_MS = 300;          // shorter than this is a door, a cough, a knock
+
+  let ctx = null, stream = null, source = null, node = null;
+  let wanted = false, speaking = false, piece = [], sinceQuiet = 0;
+  let floor = 0.01;                  // the room's own quiet, learned continuously
+  const waiting = [];
+  let busy = false;
+
+  function heardIt(ev) {
+    const data = ev.inputBuffer.getChannelData(0);
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 1) sum += data[i] * data[i];
+    const loudness = Math.sqrt(sum / data.length);
+    const rate = ctx.sampleRate;
+    const chunkMs = (data.length / rate) * 1000;
+
+    // Learned only while nobody is speaking, or it would slowly decide that your voice
+    // is what silence sounds like.
+    if (!speaking) floor = floor * 0.995 + loudness * 0.005;
+    const loud = loudness > Math.max(floor * 3.5, 0.006);
+
+    if (loud) {
+      if (!speaking) { speaking = true; piece = []; onSound?.(); }
+      sinceQuiet = 0;
+      piece.push(new Float32Array(data));
+      return;
+    }
+
+    if (!speaking) return;
+    sinceQuiet += chunkMs;
+    // The quiet part is kept too: words trail off, and cutting at the moment it stops
+    // being loud clips the end of the last one.
+    piece.push(new Float32Array(data));
+    if (sinceQuiet < QUIET_ENDS_A_PIECE_MS) return;
+
+    speaking = false;
+    const spokenMs = ((piece.length * data.length) / rate) * 1000 - sinceQuiet;
+    if (spokenMs >= MIN_PIECE_MS) {
+      let total = 0;
+      for (const part of piece) total += part.length;
+      const all = new Float32Array(total);
+      let at = 0;
+      for (const part of piece) { all.set(part, at); at += part.length; }
+      send(all, rate);
+    }
+    piece = [];
+  }
+
+  /** Plain 16-bit samples at the rate the ear wants, made here rather than there. */
+  function asPlainSound(samples, fromRate) {
+    const ratio = fromRate / WANT_RATE;
+    const length = Math.floor(samples.length / ratio);
+    const out = new DataView(new ArrayBuffer(length * 2));
+    for (let i = 0; i < length; i += 1) {
+      const at = i * ratio;
+      const lo = Math.floor(at);
+      const hi = Math.min(lo + 1, samples.length - 1);
+      let v = samples[lo] + (samples[hi] - samples[lo]) * (at - lo);
+      v = Math.max(-1, Math.min(1, v));
+      out.setInt16(i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+    }
+    return out.buffer;
+  }
+
+  // Strictly in the order they were spoken, one at a time. Two at once and a short
+  // piece overtakes a long one, which puts your words back in the wrong order — and
+  // nothing downstream could ever tell that had happened.
+  function send(samples, rate) {
+    waiting.push({ samples, rate });
+    if (!busy) drain();
+  }
+
+  async function drain() {
+    busy = true;
+    while (waiting.length) {
+      const job = waiting.shift();
+      try {
+        const answer = await fetch("/heard", {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: asPlainSound(job.samples, job.rate),
+        });
+        const got = answer.ok ? await answer.json() : null;
+        const text = String(got?.text ?? "").trim();
+        if (text) {
+          trace("heard (from the Mac)", text);
+          // The whole piece at once. What the phone called half-heard words does not
+          // exist here, so the two callbacks that fed on those are given the finished
+          // words instead: the screen catches up in one go, and anything that acts on
+          // the attention word acts now rather than sooner.
+          onHearing?.(text);
+          onPartialPhrase?.(text);
+          onHeard(text);
+        }
+      } catch (err) {
+        trace("the Mac could not hear that", err?.message ?? err);
+      }
+    }
+    busy = false;
+  }
+
+  return {
+    async start() {
+      wanted = true;
+      try {
+        // Echo cancellation matters more here than it ever did: this ear will happily
+        // write down the Mac's own voice coming back off the windscreen, because it has
+        // no idea any of the sound is its own.
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        });
+      } catch {
+        onTrouble("The phone won't give this page the microphone. Allow it in Safari's settings for this site.");
+        return;
+      }
+      if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
+      ctx = new (window.AudioContext ?? window.webkitAudioContext)();
+      source = ctx.createMediaStreamSource(stream);
+      node = ctx.createScriptProcessor(4096, 1, 1);
+      node.onaudioprocess = heardIt;
+      source.connect(node);
+      node.connect(ctx.destination);
+      speaking = false;
+      piece = [];
+      trace("listening", "the Mac is doing the hearing");
+    },
+    stop() {
+      wanted = false;
+      speaking = false;
+      piece = [];
+      try { node?.disconnect(); source?.disconnect(); } catch {}
+      try { ctx?.close(); } catch {}
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      ctx = null; stream = null; source = null; node = null;
+    },
+  };
+}
+
 function deviceEars({ onHeard, onHearing, onPartialPhrase, onTrouble }) {
   const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
   if (!Recognition) return null;
@@ -2507,7 +2675,12 @@ function splitFrontEnd() {
       if (!mouth) throw new Error("This browser has no built-in voice. Use Safari.");
       mouth.unlock();
 
-      ears = deviceEars({
+      // Which ear. The Mac's when it is there, the phone's own when it is not — and
+      // saying so in the trace, because "it did not hear me" is the same complaint
+      // either way and the two have very different causes.
+      const makeEars = setup.earOnTheMac ? macEars : deviceEars;
+      trace("ear", setup.earOnTheMac ? "the Mac is hearing" : "the phone is hearing");
+      ears = makeEars({
         onHeard: heard,
         onHearing: (text) => {
           // Not shown while it is talking, because it is not being kept either. Watching
