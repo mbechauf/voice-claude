@@ -2833,9 +2833,22 @@ function splitFrontEnd() {
           try { ears?.stop(); } catch {}
           // Which of the two it was, because they have completely different cures and
           // one message for both sent somebody looking in the wrong place.
-          log(`${why ?? "the Mac couldn't hear"}, so I'm listening on the phone instead`, "bad");
-          ears = startEars(false);
-          ears?.start();
+          // When a tap is going to be offered, nothing is started in the meantime.
+          //
+          // This is the trap the last three attempts kept falling into. Starting the
+          // phone's own dictation while waiting for a tap means that when the tap comes
+          // the phone is already holding its microphone, and it will not hand the same
+          // one to two things. Letting go in the same breath does not help: it does not
+          // let go instantly. Waiting for it to let go spends the tap. There is no
+          // order of those three that works — so the answer is not to be listening at
+          // all for the few seconds between the offer and the tap.
+          if (worthAnotherGo) {
+            log("tap the screen once and the Mac will do the hearing", "work");
+          } else {
+            log(`${why ?? "the Mac couldn't hear"}, so I'm listening on the phone instead`, "bad");
+            ears = startEars(false);
+            ears?.start();
+          }
 
           // A phone will not hand a page the microphone unless a finger asked for it,
           // and this app deliberately starts itself without one — at seventy miles an
@@ -2850,7 +2863,7 @@ function splitFrontEnd() {
           setState("tap the screen once and the Mac can do the hearing");
           const onTouch = () => {
             document.removeEventListener("click", onTouch);
-            trace("a tap arrived", "letting go of the phone's ear, then asking");
+            trace("a tap arrived", "asking with nothing else listening");
             // Let go of the phone's own dictation first — and in the same breath, with
             // nothing waited for in between.
             //

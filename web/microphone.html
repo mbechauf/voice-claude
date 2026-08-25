@@ -17,6 +17,7 @@
 <p>Nothing else runs on this page. One tap, and it says exactly what happened.</p>
 <button id="go">Ask the simple way</button>
 <button id="fussy" style="background:#fc6;color:#530">Ask the way the app asks</button>
+<button id="loaded" style="background:#8ae;color:#014">Ask with sound playing and dictation on</button>
 <div id="out"></div>
 <script>
   // Deliberately the smallest page that can fail. If the microphone is handed over
@@ -53,6 +54,37 @@
       stream.getTracks().forEach((t) => t.stop());
     } catch (err) {
       say(`REFUSED the fussy way: ${err.name}`, "bad");
+      say(`it said: ${err.message || "nothing"}`, "bad");
+    }
+  });
+
+  // The app is never in the bare state this page is in: it has already made sound, and
+  // it has the phone's own dictation running. Either could be what makes the phone
+  // refuse. This reproduces both, so which one it is can be seen rather than guessed.
+  document.getElementById("loaded").addEventListener("click", async () => {
+    say("— with sound and dictation running —");
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      await ctx.resume();
+      const beep = ctx.createOscillator();
+      beep.connect(ctx.destination);
+      beep.start();
+      setTimeout(() => { try { beep.stop(); } catch (e) {} }, 200);
+      say("sound is playing");
+    } catch (err) { say(`could not make sound: ${err.name}`, "bad"); }
+
+    try {
+      const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (Rec) { const r = new Rec(); r.continuous = true; r.start(); say("dictation started"); }
+      else say("no dictation on this browser");
+    } catch (err) { say(`could not start dictation: ${err.name}`, "bad"); }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      say(`GOT IT even so: ${stream.getAudioTracks()[0]?.label || "no label"}`, "good");
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (err) {
+      say(`REFUSED with those running: ${err.name}`, "bad");
       say(`it said: ${err.message || "nothing"}`, "bad");
     }
   });
