@@ -409,7 +409,12 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
    * because nobody is looking at it will be able to the second they are.
    */
   async function askForTheMicrophone(tries = 4) {
-    const wants = { audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } };
+    // Asked for plainly. The page that works asks for "a microphone" and nothing else,
+    // and this one was asking for one channel with echo cancellation and noise
+    // suppression — a shopping list, on a device that may have nothing matching it.
+    // The refinements are asked for afterwards, on the microphone we were given, where
+    // being turned down costs nothing at all.
+    const wants = { audio: true };
     let last = null;
     for (let go = 0; go < tries; go += 1) {
       if (!wanted) throw new Error("no longer listening");
@@ -453,6 +458,21 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         // write down the Mac's own voice coming back off the windscreen, because it has
         // no idea any of the sound is its own.
         stream = alreadyGranted ?? await askForTheMicrophone();
+        // Now that we have it, ask it to behave. Echo cancellation matters more here
+        // than it ever did — this ear will happily write down the Mac's own voice
+        // coming back off the windscreen, because it has no idea any of the sound is
+        // its own. But it is a preference, not a condition: a microphone that will not
+        // do it is still a microphone, and refusing one on those grounds is how you end
+        // up with no ear at all.
+        try {
+          await stream.getAudioTracks()[0]?.applyConstraints({
+            echoCancellation: true,
+            noiseSuppression: true,
+            channelCount: 1,
+          });
+        } catch (err) {
+          trace("the microphone would not take the refinements", err?.name ?? "?");
+        }
       } catch (err) {
         // Refused. This is not a fault to report and stop at — it is the commonest way
         // the new ear fails, and it leaves somebody driving with no way to talk at all.
@@ -2846,7 +2866,7 @@ function splitFrontEnd() {
             // the part every earlier attempt got wrong: each one waited first.
             try { ears?.stop(); } catch {}
             navigator.mediaDevices
-              .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+              .getUserMedia({ audio: true })
               .then((granted) => {
                 ears = startEars(true);
                 ears?.start(granted);

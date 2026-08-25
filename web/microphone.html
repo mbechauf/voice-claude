@@ -15,7 +15,8 @@
 </style>
 <h1>Can this phone hear?</h1>
 <p>Nothing else runs on this page. One tap, and it says exactly what happened.</p>
-<button id="go">Ask for the microphone</button>
+<button id="go">Ask the simple way</button>
+<button id="fussy" style="background:#fc6;color:#530">Ask the way the app asks</button>
 <div id="out"></div>
 <script>
   // Deliberately the smallest page that can fail. If the microphone is handed over
@@ -36,6 +37,25 @@
       navigator.mediaDevices?.getUserMedia ? "good" : "bad");
   say(`page is: ${document.visibilityState}`);
   say(`standalone app icon: ${Boolean(window.navigator.standalone)}`);
+
+  // The same question asked twice, in the two shapes. The app does not ask for "a
+  // microphone" — it asks for one channel, with echo cancellation and noise
+  // suppression, because it has to talk over its own voice. A phone that hands over a
+  // microphone for the plain question and refuses the fussy one would explain
+  // everything, and there is no way to know which without asking both.
+  document.getElementById("fussy").addEventListener("click", async () => {
+    say("— asking the fussy way —");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      say(`GOT IT the fussy way: ${stream.getAudioTracks()[0]?.label || "no label"}`, "good");
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (err) {
+      say(`REFUSED the fussy way: ${err.name}`, "bad");
+      say(`it said: ${err.message || "nothing"}`, "bad");
+    }
+  });
 
   document.getElementById("go").addEventListener("click", async () => {
     say("— asking now —");
