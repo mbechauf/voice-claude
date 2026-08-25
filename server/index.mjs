@@ -538,6 +538,11 @@ async function handle(req, res) {
   if (url.pathname === "/setup") {
     return send(res, 200, {
       mode: MODE,
+      // The one address with a real certificate on it, so the page can tell whether it
+      // was opened by that name or by a number. A phone will not give a page a
+      // microphone when it had to be warned about the certificate, and it does not say
+      // that is why — it complains about something else entirely.
+      trustedName: creds.warns ? "" : (tailnetName() ?? ""),
       listener: LISTENER,
       speaker,
       speakerVoice: SPEAKER_VOICE,

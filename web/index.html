@@ -2842,8 +2842,19 @@ function splitFrontEnd() {
                 ears?.start(granted);
               })
               .catch((err) => {
-                trace("still no microphone", err?.name ?? "?");
-                log(`still no microphone (${err?.name ?? "no reason given"})`, "bad");
+                trace("still no microphone", `${err?.name ?? "?"} at ${location.hostname}`);
+                // Which address this page was opened by, said out loud with the
+                // failure. A phone refuses the microphone outright on a page whose
+                // certificate it had to warn about — and it blames something else
+                // while doing it, which is how hours go into the wrong question.
+                const trusted = setup.trustedName ?? "";
+                const wrongDoor = trusted && location.hostname !== trusted;
+                log(
+                  wrongDoor
+                    ? `still no microphone (${err?.name ?? "?"}) — this page was opened as ${location.hostname}. Open it as ${trusted} instead; a phone will not give a microphone to an address it had to warn you about.`
+                    : `still no microphone (${err?.name ?? "no reason given"}) at ${location.hostname}`,
+                  "bad",
+                );
               });
           };
           // A finished click, not the beginning of a touch. A phone counts only some
