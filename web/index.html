@@ -2829,7 +2829,7 @@ function splitFrontEnd() {
           if (!worthAnotherGo) return;
           setState("tap the screen once and the Mac can do the hearing");
           const onTouch = () => {
-            document.removeEventListener("pointerdown", onTouch);
+            document.removeEventListener("click", onTouch);
             trace("a tap arrived", "asking for the microphone in the touch itself");
             // Asked here, first, before anything is stopped or started. This is the
             // only line in the whole exchange that has to be in the touch, and every
@@ -2846,7 +2846,11 @@ function splitFrontEnd() {
                 log(`still no microphone (${err?.name ?? "no reason given"})`, "bad");
               });
           };
-          document.addEventListener("pointerdown", onTouch, { once: true });
+          // A finished click, not the beginning of a touch. A phone counts only some
+          // events as somebody actually asking for something, and the press going down
+          // is not one of them — the page that already works uses a click, and this is
+          // the last difference left between the two.
+          document.addEventListener("click", onTouch, { once: true });
         },
         onHeard: heard,
         onHearing: (text) => {
