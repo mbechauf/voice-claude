@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Can this phone hear?</title>
+<style>
+  body { font: 17px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 20px;
+         background: #111; color: #eee; }
+  button { font-size: 22px; padding: 18px 26px; width: 100%; margin: 14px 0 20px;
+           border: 0; border-radius: 12px; background: #2d6; color: #052; font-weight: 600; }
+  .line { padding: 6px 0; border-bottom: 1px solid #333; }
+  .bad { color: #f88; }
+  .good { color: #8f8; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: #999; margin: 0 0 8px; }
+</style>
+<h1>Can this phone hear?</h1>
+<p>Nothing else runs on this page. One tap, and it says exactly what happened.</p>
+<button id="go">Ask for the microphone</button>
+<div id="out"></div>
+<script>
+  // Deliberately the smallest page that can fail. If the microphone is handed over
+  // here and refused in the app, the fault is the app's. If it is refused here too,
+  // nothing the app does could have helped and the answer is somewhere in the phone,
+  // the site, or the way the page was opened.
+  const out = document.getElementById("out");
+  const say = (text, how = "") => {
+    const line = document.createElement("div");
+    line.className = `line ${how}`;
+    line.textContent = text;
+    out.append(line);
+  };
+
+  say(`opened as: ${location.hostname}`);
+  say(`counts as secure: ${window.isSecureContext}`, window.isSecureContext ? "good" : "bad");
+  say(`can be asked at all: ${Boolean(navigator.mediaDevices?.getUserMedia)}`,
+      navigator.mediaDevices?.getUserMedia ? "good" : "bad");
+  say(`page is: ${document.visibilityState}`);
+  say(`standalone app icon: ${Boolean(window.navigator.standalone)}`);
+
+  document.getElementById("go").addEventListener("click", async () => {
+    say("— asking now —");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      say(`GOT IT: ${stream.getAudioTracks().length} audio track(s)`, "good");
+      say(`track: ${stream.getAudioTracks()[0]?.label || "no label"}`, "good");
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (err) {
+      say(`REFUSED: ${err.name}`, "bad");
+      say(`it said: ${err.message || "nothing"}`, "bad");
+    }
+    try {
+      const kinds = await navigator.mediaDevices.enumerateDevices();
+      say(`devices it will admit to: ${kinds.map((d) => d.kind).join(", ") || "none"}`);
+    } catch (err) {
+      say(`could not even list devices: ${err.name}`, "bad");
+    }
+  });
+</script>

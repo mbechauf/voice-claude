@@ -472,6 +472,16 @@ async function mintVoiceToken() {
 async function handle(req, res) {
   const url = new URL(req.url, "http://localhost");
 
+  // The smallest page that can fail: one button, no app around it. When something is
+  // refused in the app and works here, the app is at fault; when it is refused here
+  // too, nothing the app does could ever have helped. Guessing between those two from
+  // the passenger seat has cost most of a night.
+  if (url.pathname === "/microphone") {
+    const file = path.join(root, "web", "microphone.html");
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    return res.end(fs.readFileSync(file));
+  }
+
   if (url.pathname === "/" || url.pathname === "/index.html") {
     const file = path.join(root, "web", "index.html");
     const html = fs.readFileSync(file, "utf8");
