@@ -2830,14 +2830,24 @@ function splitFrontEnd() {
           setState("tap the screen once and the Mac can do the hearing");
           const onTouch = () => {
             document.removeEventListener("click", onTouch);
-            trace("a tap arrived", "asking for the microphone in the touch itself");
-            // Asked here, first, before anything is stopped or started. This is the
-            // only line in the whole exchange that has to be in the touch, and every
-            // attempt so far put something in front of it.
+            trace("a tap arrived", "letting go of the phone's ear, then asking");
+            // Let go of the phone's own dictation first — and in the same breath, with
+            // nothing waited for in between.
+            //
+            // This is the last difference between this page and the one that already
+            // works: that page has never had a recogniser running when it asks. This
+            // one always has, because falling back to the phone's dictation is what
+            // keeps somebody able to talk while all this is going wrong. A phone gives
+            // its microphone to one thing at a time, and it does not say that is the
+            // problem — it complains about the state of the page instead.
+            //
+            // Stopping is instant and asking is the next line, so the finger that
+            // arrived with this click is still there when the asking happens. That is
+            // the part every earlier attempt got wrong: each one waited first.
+            try { ears?.stop(); } catch {}
             navigator.mediaDevices
               .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
               .then((granted) => {
-                try { ears?.stop(); } catch {}
                 ears = startEars(true);
                 ears?.start(granted);
               })
@@ -2855,6 +2865,10 @@ function splitFrontEnd() {
                     : `still no microphone (${err?.name ?? "no reason given"}) at ${location.hostname}`,
                   "bad",
                 );
+                // The phone's ear was let go of on the way in, so it has to be picked
+                // back up or the failed experiment costs somebody their voice.
+                ears = startEars(false);
+                ears?.start();
               });
           };
           // A finished click, not the beginning of a touch. A phone counts only some
