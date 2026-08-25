@@ -413,7 +413,12 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
     let last = null;
     for (let go = 0; go < tries; go += 1) {
       if (!wanted) throw new Error("no longer listening");
-      if (document.visibilityState !== "visible") {
+      // Never before the first attempt. Waiting for anything at all — a page to become
+      // visible, a moment to pass, another ear to let go — spends the very thing being
+      // asked with: a phone hands over a microphone in answer to a finger, in that
+      // instant, and anything that happens first has already lost it. Both of the
+      // careful waits added here did exactly that, and each looked like a new fault.
+      if (go > 0 && document.visibilityState !== "visible") {
         trace("waiting for the page to be in front", `try ${go + 1}`);
         await new Promise((done) => {
           const seen = () => { document.removeEventListener("visibilitychange", seen); done(); };
@@ -436,13 +441,18 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
   }
 
   return {
-    async start() {
+    async start(alreadyGranted = null) {
       wanted = true;
       try {
+        // A microphone somebody already handed us is used as it is. That is the whole
+        // difference between working and not: a phone gives one out in answer to a
+        // finger, in that instant and no later, so the asking has to happen in the
+        // touch itself and everything else has to happen afterwards.
+        //
         // Echo cancellation matters more here than it ever did: this ear will happily
         // write down the Mac's own voice coming back off the windscreen, because it has
         // no idea any of the sound is its own.
-        stream = await askForTheMicrophone();
+        stream = alreadyGranted ?? await askForTheMicrophone();
       } catch (err) {
         // Refused. This is not a fault to report and stop at — it is the commonest way
         // the new ear fails, and it leaves somebody driving with no way to talk at all.
@@ -2820,16 +2830,21 @@ function splitFrontEnd() {
           setState("tap the screen once and the Mac can do the hearing");
           const onTouch = () => {
             document.removeEventListener("pointerdown", onTouch);
-            trace("a tap arrived", "trying the Mac's ear again");
-            try { ears?.stop(); } catch {}
-            // A moment between letting go of the microphone and asking for it. The
-            // phone's own dictation does not hand it back the instant it is told to
-            // stop, and asking while it still holds it is refused — which is
-            // indistinguishable from the tap having been ignored.
-            setTimeout(() => {
-              ears = startEars(true);
-              ears?.start();
-            }, 600);
+            trace("a tap arrived", "asking for the microphone in the touch itself");
+            // Asked here, first, before anything is stopped or started. This is the
+            // only line in the whole exchange that has to be in the touch, and every
+            // attempt so far put something in front of it.
+            navigator.mediaDevices
+              .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+              .then((granted) => {
+                try { ears?.stop(); } catch {}
+                ears = startEars(true);
+                ears?.start(granted);
+              })
+              .catch((err) => {
+                trace("still no microphone", err?.name ?? "?");
+                log(`still no microphone (${err?.name ?? "no reason given"})`, "bad");
+              });
           };
           document.addEventListener("pointerdown", onTouch, { once: true });
         },
