@@ -287,11 +287,15 @@ function listenForResults(handle) {
  * Taken from the advisor's speech branch, where it was built and driven with, rather
  * than written again from the description of it.
  */
-function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDeaf }) {
+function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDeaf, onWorkingOnIt }) {
   if (!navigator.mediaDevices?.getUserMedia) return null;
 
   const WANT_RATE = 16000;          // what the ear expects, and all it accepts
-  const QUIET_ENDS_A_PIECE_MS = 700; // a pause this long means you have finished a piece
+  // The pause that ends a piece, and most of the wait anybody feels. Long enough that
+  // an ordinary breath mid-sentence does not cut you off, short enough that stopping
+  // does not feel like being ignored. The rest of the wait — sending it and turning it
+  // into words — is about a third of a second and is not where the time goes.
+  const QUIET_ENDS_A_PIECE_MS = 500;
   const MIN_PIECE_MS = 300;          // shorter than this is a door, a cough, a knock
 
   let ctx = null, stream = null, source = null, node = null;
@@ -370,6 +374,7 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
     busy = true;
     while (waiting.length) {
       const job = waiting.shift();
+      onWorkingOnIt?.(true);
       try {
         const answer = await fetch("/heard", {
           method: "POST",
@@ -391,6 +396,7 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
       } catch (err) {
         trace("the Mac could not hear that", err?.message ?? err);
       }
+      onWorkingOnIt?.(false);
     }
     busy = false;
   }
@@ -2919,6 +2925,18 @@ function splitFrontEnd() {
           // is not one of them — the page that already works uses a click, and this is
           // the last difference left between the two.
           document.addEventListener("click", onTouch, { once: true });
+        },
+        // Nothing appears on the screen while somebody talks any more, because nothing
+        // exists yet — the Mac is only given whole pieces, at the pauses. A screen that
+        // sits blank while you speak reads as a screen that is not listening, which is
+        // the one thing it must never read as. So it says what it is doing at each of
+        // the two moments it now has: sound arriving, and a piece gone off to be turned
+        // into words.
+        onSound: () => { if (!working && !mouth?.busy) setState("listening…"); },
+        onWorkingOnIt: (yes) => {
+          if (working || mouth?.busy) return;
+          if (yes) setState("working out what you said…");
+          else if (!question.length) idleState();
         },
         onHeard: heard,
         onHearing: (text) => {
