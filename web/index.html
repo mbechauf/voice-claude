@@ -291,11 +291,18 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
   if (!navigator.mediaDevices?.getUserMedia) return null;
 
   const WANT_RATE = 16000;          // what the ear expects, and all it accepts
-  // The pause that ends a piece, and most of the wait anybody feels. Long enough that
-  // an ordinary breath mid-sentence does not cut you off, short enough that stopping
-  // does not feel like being ignored. The rest of the wait — sending it and turning it
-  // into words — is about a third of a second and is not where the time goes.
-  const QUIET_ENDS_A_PIECE_MS = 500;
+  // The pause that ends a piece. It looks like a knob for how fast words appear, and it
+  // is really a knob for how well they are heard — which is the whole reason for
+  // hearing on the Mac at all.
+  //
+  // Every break becomes a cut, and each piece is turned into words on its own, knowing
+  // nothing of the one before it. Cut at every hesitation and the ear is given
+  // fragments instead of sentences, and it does what anybody would do with a fragment:
+  // guesses. Five tenths of a second was tried and it chopped ordinary speech into
+  // pieces mid-thought. So it sits well past a thinking pause, and the cost — a beat
+  // longer before anything appears — is paid in the one place there is something to
+  // show for it.
+  const QUIET_ENDS_A_PIECE_MS = 900;
   const MIN_PIECE_MS = 300;          // shorter than this is a door, a cough, a knock
 
   let ctx = null, stream = null, source = null, node = null;
