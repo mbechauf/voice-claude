@@ -1591,9 +1591,19 @@ const sound = {
     // Without it, everything here is silenced by the mute switch on the side of the
     // phone — which looks exactly like broken code from the inside, because the page
     // is told the sound played and it did, into nothing.
+    //
+    // And this is also where a whole night went. Telling a phone the page is for
+    // playing sound tells it, in the same breath, that the page does not record — so
+    // the microphone is refused, flatly, and the refusal blames the state of the page
+    // rather than saying anything about recording. Certificates, taps, addresses and
+    // other listeners were all investigated first; this one line was the answer the
+    // whole time.
+    //
+    // So when this Mac is doing the hearing, the page says it both plays and records,
+    // which is what it actually does.
     try {
       if (navigator.audioSession) {
-        navigator.audioSession.type = "playback";
+        navigator.audioSession.type = setup.earOnTheMac ? "play-and-record" : "playback";
         trace("audio session", navigator.audioSession.type);
       } else {
         trace("audio session", "not offered by this phone");
