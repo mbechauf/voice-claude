@@ -327,7 +327,12 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
     const loud = loudness > Math.max(floor * 3.5, 0.006);
 
     if (loud) {
-      if (!speaking) { speaking = true; piece = []; onSound?.(); }
+      if (!speaking) { speaking = true; piece = []; }
+      // Every moment there is a voice, not only the first. The rest of the app used to
+      // learn "somebody is still talking" from half-heard words arriving continuously,
+      // and those do not exist any more — so this is now the only thing that knows, and
+      // it has to say so all the way through rather than once at the start.
+      onSound?.();
       sinceQuiet = 0;
       piece.push(new Float32Array(data));
       return;
@@ -2939,7 +2944,19 @@ function splitFrontEnd() {
         // the one thing it must never read as. So it says what it is doing at each of
         // the two moments it now has: sound arriving, and a piece gone off to be turned
         // into words.
-        onSound: () => { if (!working && !mouth?.busy) setState("listening…"); },
+        // Sound in the room is you talking, and that is now the only sign of it there
+        // is. It has to do everything a half-heard word used to do: keep the clock that
+        // decides you have finished pushed forward, and call off an offer to send that
+        // has not been made yet.
+        //
+        // Without this the app believed you were silent from the moment you started
+        // speaking until the moment you stopped — so it offered to send in the middle of
+        // sentences, over and over, which is exactly how it felt.
+        onSound: () => {
+          lastHeardAt = Date.now();
+          stopOffering();
+          if (!working && !mouth?.busy) setState("listening…");
+        },
         onWorkingOnIt: (yes) => {
           if (working || mouth?.busy) return;
           if (yes) setState("working out what you said…");
