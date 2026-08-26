@@ -2406,7 +2406,10 @@ function splitFrontEnd() {
   // a project with a sentence stuck to it. So this takes the longest name that fits
   // the opening words and hands back whatever is left over.
   function projectAtTheFront(said) {
-    const bare = (text) => text.toLowerCase().replace(/^(the|my)\s+/, "").trim();
+    // "a" as well as "the". Said out loud it is "switch to the knowledge app", and heard
+    // it is as often "switch to a knowledge app" — dictation writes the little word it
+    // thought it heard, and no name here ever begins with one.
+    const bare = (text) => text.toLowerCase().replace(/^(the|my|a|an)\s+/, "").trim();
     const spoken = bare(said);
     if (!spoken) return null;
 
