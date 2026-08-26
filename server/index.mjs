@@ -570,7 +570,7 @@ async function handle(req, res) {
       // every page load, in red, to somebody driving who cannot do anything about it.
       // Until it starts reliably it stays behind a switch, so trying it is a decision
       // somebody makes while parked rather than something that happens to them.
-      earOnTheMac: ear.isInstalled() && process.env.VOICE_CLAUDE_EAR !== "off",
+      earOnTheMac: ear.isInstalled() && process.env.VOICE_CLAUDE_EAR === "on",
       whatEachDoes: WHAT_EACH_DOES,
       answers: ANSWERS,
       answerWindow: ANSWER_WINDOW_MS,
