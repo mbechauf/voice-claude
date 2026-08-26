@@ -34,6 +34,10 @@ export const PROJECTS = {
       "the voice project", "this app", "yourself",
     ],
   },
+  "the knowledge app": {
+    at: path.join(CODE, "Advisor-LLM-Knowledge"),
+    alsoCalled: ["knowledge", "the knowledge", "knowledge app", "knowledge graph", "the knowledge branch"],
+  },
   "the speech branch": {
     at: path.join(CODE, "Advisor-LLM-Speech"),
     alsoCalled: ["speech", "the speech", "speech branch", "the listening branch", "listening"],
