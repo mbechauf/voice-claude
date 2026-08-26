@@ -569,6 +569,25 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
         onDeaf?.("the Mac heard nothing at all");
       }, 5_000);
     },
+    // Let go of the microphone without giving up listening. Used while it speaks, so
+    // the phone can put the sound back on the good connection — and taken back the
+    // moment it stops. Permission is not asked for twice: a phone that has said yes
+    // once goes on saying yes for as long as the page is open, so no finger is needed.
+    pause() {
+      if (!stream) return;
+      trace("letting go of the microphone", "while it talks");
+      try { node?.disconnect(); source?.disconnect(); } catch {}
+      try { ctx?.close(); } catch {}
+      stream.getTracks().forEach((t) => t.stop());
+      ctx = null; stream = null; source = null; node = null;
+      speaking = false;
+      piece = [];
+    },
+    resume() {
+      if (!wanted || stream) return;
+      trace("taking the microphone back", "it has finished talking");
+      this.start();
+    },
     stop() {
       wanted = false;
       speaking = false;
@@ -1760,10 +1779,33 @@ function splitFrontEnd() {
   // voice is queued sentence by sentence and a long answer takes as long as it takes,
   // so anything that has to land after the last word has to wait to be called.
   let whenQuiet = [];
+  // Telling the phone this page records is what makes a car stereo treat it as a phone
+  // call rather than as music — narrow, thin and quiet, over the same connection that
+  // plays music perfectly well. That is not a browser quirk, it is how a phone works:
+  // recording and music-quality playback cannot both be had at once over one Bluetooth
+  // link. The ones that sound good in a car are the ones that stop recording while
+  // they talk.
+  //
+  // Which this app already does. It is deliberately deaf while it speaks — nothing it
+  // hears then reaches anything — so nothing is given up by actually letting go of the
+  // microphone for those few seconds, and the voice comes back as music.
+  const forSpeaking = () => { try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {} };
+  const forListening = () => {
+    try { if (navigator.audioSession && setup.earOnTheMac) navigator.audioSession.type = "play-and-record"; } catch {}
+  };
+
   const talking = {
-    onStart: () => paint(),
+    onStart: () => {
+      paint();
+      // Let go first, then say it is for playing. In that order: a phone will not
+      // change how it sounds while something still holds the microphone.
+      ears?.pause?.();
+      forSpeaking();
+    },
     onFinish: () => {
       paint();
+      forListening();
+      ears?.resume?.();
       idleState();
       const waiting = whenQuiet;
       whenQuiet = [];
