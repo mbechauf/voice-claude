@@ -82,6 +82,26 @@ const endBtn = document.getElementById("end");
 
 const setup = await (await fetch("/setup")).json();
 
+/**
+ * Ask the Mac again which projects there are.
+ *
+ * The list arrives once, when this page loads, and a project added afterwards simply
+ * does not exist as far as the page is concerned — it hears the name, fails to match
+ * it, and keeps it as ordinary words. From the driver's seat that is the app ignoring
+ * a perfectly good instruction, and the cure is a reload nobody would think of.
+ */
+async function refreshTheProjects() {
+  try {
+    const now = await (await fetch("/setup")).json();
+    if (Array.isArray(now?.projectNames)) setup.projectNames = now.projectNames;
+    if (now?.giveaways) setup.giveaways = now.giveaways;
+    if (now?.whatEachDoes) setup.whatEachDoes = now.whatEachDoes;
+    trace("asked again which projects there are", `${setup.projectNames?.length ?? 0} names`);
+  } catch (err) {
+    trace("could not ask which projects there are", err?.message ?? err);
+  }
+}
+
 
 function setState(text) { stateEl.textContent = text; }
 
@@ -2737,6 +2757,32 @@ function splitFrontEnd() {
 
       if (awaitingProject) {
         const found = projectAtTheFront(said);
+        // A project added on the Mac since this page loaded is a project this page has
+        // never heard of: it hears the name, fails to match it, and keeps it as
+        // ordinary words. From the driver's seat that is the app ignoring a perfectly
+        // good instruction, and the cure — reload the page — is not something anybody
+        // would think of.
+        //
+        // So a name it does not know is a reason to ask the Mac again rather than to
+        // give up. Asked only here, where somebody has plainly just named a project, so
+        // it costs nothing at any other time. Done to one side rather than waited for,
+        // because everything else about hearing a sentence has to stay in the order it
+        // was said in.
+        if (!found) {
+          awaitingProject = null;
+          refreshTheProjects().then(() => {
+            const late = projectAtTheFront(said);
+            if (late) {
+              trace("a project this page had not heard of", late.project);
+              switchTo(late.project, late.rest);
+            } else {
+              remember(said);
+              trace("not a project, so just words", said);
+              show();
+            }
+          });
+          continue;
+        }
         awaitingProject = null;
         if (found) {
           switchTo(found.project, found.rest);
