@@ -323,7 +323,10 @@ function macEars({ onHeard, onHearing, onPartialPhrase, onTrouble, onSound, onDe
   // longer before anything appears — is paid in the one place there is something to
   // show for it.
   const QUIET_ENDS_A_PIECE_MS = 900;
-  const MIN_PIECE_MS = 300;          // shorter than this is a door, a cough, a knock
+  // Shorter than this is a door, a cough, a knock. Kept low on purpose: the shortest
+  // thing anybody ever says is also the most important — "yes", "no", "stop" — and a
+  // floor set for comfort throws away exactly those.
+  const MIN_PIECE_MS = 150;
 
   let ctx = null, stream = null, source = null, node = null;
   let wanted = false, speaking = false, piece = [], sinceQuiet = 0;
@@ -2302,9 +2305,31 @@ function splitFrontEnd() {
 
   // Is this the whole of an answer to a question it asked, and nothing else? Asked
   // separately from acting on it, because the echo test upstream has to know.
-  const isBareAnswer = (text) =>
-    Boolean(waitingOn) &&
-    (saidExactly(text, setup.answers?.yes ?? []) || saidExactly(text, setup.answers?.no ?? []));
+  /**
+   * The answer on its own, with anything that is not words stripped off the end.
+   *
+   * "Yes" used to arrive by itself, because the phone's dictation cut a piece at every
+   * pause and a pause always followed. The Mac is given whole thoughts instead, so what
+   * arrives is "Yes, over to you" — the answer and the phrase that sends things, said in
+   * one breath, exactly as anybody would say it. That is not "an answer plus a sentence",
+   * which is deliberately not treated as an answer; it is an answer plus an instruction,
+   * and the instruction is not part of what was being answered.
+   *
+   * So the instructions are taken out first and what remains is tested. Say anything of
+   * substance after the yes and it is a sentence again, as it always was.
+   */
+  const withoutInstructions = (text) =>
+    readAsInstructions(text, setup.phrases)
+      .filter((step) => step.say)
+      .map((step) => step.say)
+      .join(" ")
+      .trim();
+
+  const isBareAnswer = (text) => {
+    if (!waitingOn) return false;
+    const words = withoutInstructions(text) || text;
+    return saidExactly(words, setup.answers?.yes ?? []) || saidExactly(words, setup.answers?.no ?? []);
+  };
 
   // Whole utterance only. "yes" is an answer; "yes and check the tests" is a
   // sentence, and goes where sentences go. Either way the waiting is over.
@@ -2313,10 +2338,14 @@ function splitFrontEnd() {
     const said = plainWords(text).join(" ");
     if (!said) return false;
 
+    // Judged on the words, with any instruction said in the same breath taken out —
+    // see the note above. "Yes" and "yes, over to you" mean the same thing to a person
+    // and now mean the same thing here.
+    const bare = withoutInstructions(text) || text;
     const { onYes, onNo } = waitingOn;
     stopWaiting();
-    if (saidExactly(text, setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
-    if (saidExactly(text, setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
+    if (saidExactly(bare, setup.answers?.yes ?? [])) { trace("ANSWERED", "yes"); onYes?.(); return true; }
+    if (saidExactly(bare, setup.answers?.no ?? [])) { trace("ANSWERED", "no"); onNo?.(); return true; }
     saidSomethingSince = true;
     trace("stopped waiting", `said something else: ${said}`);
     return false;   // not an answer — carry on and treat it as speech
