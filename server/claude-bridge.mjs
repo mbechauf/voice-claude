@@ -150,7 +150,19 @@ export function whatHasHappened(project) {
 export function itsOwnWords(notes) {
   for (const line of [...(notes ?? [])].reverse()) {
     if (!String(line).startsWith("Said: ")) continue;
-    const said = anUpdateWorthHearing(String(line).slice("Said: ".length));
+    const whole = String(line).slice("Said: ".length).trim();
+    // Only something that was a remark in the first place. A long passage is an answer
+    // being written, not a note about progress, and taking one sentence out of the
+    // middle of an answer and reading it aloud is worse than saying nothing at all:
+    // out of its paragraph it means something else, or nothing.
+    //
+    // That is exactly what went wrong. A careful correction was written, several
+    // sentences long, and what was read out was its last line — "bringing a box up and
+    // asking it properly now" — with none of the correction it belonged to. The answer
+    // itself arrived later and read fine on the screen. From the driver's seat it
+    // sounded like the machine talking nonsense to itself between questions.
+    if (whole.split(/(?<=[.?!])\s+/).filter(Boolean).length > 1) continue;
+    const said = anUpdateWorthHearing(whole);
     if (said) return said;
   }
   return "";

@@ -843,6 +843,17 @@ async function checkItRemembersPerProject() {
     check("a written-down thing it said is not treated as speech",
       itsOwnWords(["Said: Reading `server/index.mjs` now"]) === "");
 
+    // The one that was actually read aloud to somebody driving: the last line of a
+    // careful three-sentence correction, with none of the correction attached. Out of
+    // its paragraph it meant nothing, and it sounded like the machine talking nonsense
+    // to itself between questions.
+    check("one sentence is never taken out of the middle of an answer",
+      itsOwnWords([
+        "Said: Let me be precise, because I did conflate two things. What never happened is the other thing. Bringing a box up and asking it properly now.",
+      ]) === "");
+    check("but a remark that was only ever one sentence still gets through",
+      itsOwnWords(["Said: The smoke test works, but a fifth of replacements still slip."]) !== "");
+
     // Saying which file and what it searched for is the difference between knowing
     // something is happening and knowing what is happening. But a path or a thicket of
     // symbols read aloud is worse than the vague phrase it replaced.
