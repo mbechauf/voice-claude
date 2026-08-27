@@ -151,17 +151,29 @@ export function itsOwnWords(notes) {
   for (const line of [...(notes ?? [])].reverse()) {
     if (!String(line).startsWith("Said: ")) continue;
     const whole = String(line).slice("Said: ".length).trim();
-    // Only something that was a remark in the first place. A long passage is an answer
-    // being written, not a note about progress, and taking one sentence out of the
-    // middle of an answer and reading it aloud is worse than saying nothing at all:
-    // out of its paragraph it means something else, or nothing.
+    // Said whole, or not at all. Never a piece of it.
     //
-    // That is exactly what went wrong. A careful correction was written, several
-    // sentences long, and what was read out was its last line — "bringing a box up and
-    // asking it properly now" — with none of the correction it belonged to. The answer
-    // itself arrived later and read fine on the screen. From the driver's seat it
-    // sounded like the machine talking nonsense to itself between questions.
-    if (whole.split(/(?<=[.?!])\s+/).filter(Boolean).length > 1) continue;
+    // The fault was never that these are long — several sentences of plain English
+    // about what has just been worked out is the most useful thing said all drive. The
+    // fault was cutting one line out of the middle: "bringing a box up and asking it
+    // properly now", read out with none of the correction it belonged to, meant
+    // nothing at all out loud while reading perfectly well on the screen.
+    //
+    // So a passage that is plain speech goes out entire. Only what is not plain speech
+    // — full of names and symbols nobody could follow by ear — is dropped, and then
+    // the count of what has been done is used instead.
+    const sentences = whole.split(/(?<=[.?!])\s+/).filter(Boolean);
+    if (sentences.length > 1) {
+      // Judged sentence by sentence, on the same test a single remark has to pass. One
+      // unreadable line in the middle does not condemn the passage; it is left out.
+      const speakable = sentences.filter((one) => anUpdateWorthHearing(one));
+      if (speakable.length < sentences.length / 2) continue;
+      const passage = speakable.join(" ");
+      // Long enough to say something, short enough that it is still an aside rather
+      // than an answer being delivered twice.
+      if (passage.split(/\s+/).length > 90) continue;
+      return passage;
+    }
     const said = anUpdateWorthHearing(whole);
     if (said) return said;
   }

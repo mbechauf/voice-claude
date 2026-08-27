@@ -847,10 +847,13 @@ async function checkItRemembersPerProject() {
     // careful three-sentence correction, with none of the correction attached. Out of
     // its paragraph it meant nothing, and it sounded like the machine talking nonsense
     // to itself between questions.
-    check("one sentence is never taken out of the middle of an answer",
-      itsOwnWords([
-        "Said: Let me be precise, because I did conflate two things. What never happened is the other thing. Bringing a box up and asking it properly now.",
-      ]) === "");
+    // Whole or not at all. What was read out before was the last line on its own, which
+    // meant nothing; what should be read out is the lot, which means everything.
+    const careful = itsOwnWords([
+      "Said: Let me be precise, because I did conflate two things. What never happened is the other thing. Bringing a box up and asking it properly now.",
+    ]);
+    check("several sentences are read out whole, not one line out of the middle",
+      careful.startsWith("Let me be precise") && careful.includes("Bringing a box up"), careful.slice(0, 80));
     check("but a remark that was only ever one sentence still gets through",
       itsOwnWords(["Said: The smoke test works, but a fifth of replacements still slip."]) !== "");
 
