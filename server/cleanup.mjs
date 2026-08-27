@@ -382,8 +382,13 @@ export function inPlainWords(account) {
  * evidence and what is wanted is the one thing a passenger would say about it. Where
  * it fails, the caller still has the plain count of steps it had before.
  */
-export async function soFar(account) {
-  const plain = inPlainWords(account);
+export async function soFar(account, remark = "") {
+  // The remark it made, put in front of everything else, because that is the thing
+  // most worth explaining — and explaining it is the job. A line like "eleven records
+  // still closing together" is true and useless on its own; what makes it mean
+  // anything is the work either side of it.
+  const together = remark ? `It has just said: ${remark}\n\nWhat it did:\n${account}` : account;
+  const plain = inPlainWords(together);
   if (!isInstalled() || !plain) return "";
   try {
     await ensureRunning();

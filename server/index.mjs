@@ -667,9 +667,23 @@ async function handle(req, res) {
   if (url.pathname === "/so-far" && req.method === "POST") {
     const notes = whatHasHappened(project);
     if (!notes.length) return send(res, 200, { summary: "" });
-    // Its own words first, and then no model at all. A sentence it wrote itself is
-    // already true, already plain, and already in the right voice.
-    const summary = itsOwnWords(notes) || await soFar(notes.join("\n"));
+    // Its own words when they carry their own context, and a summary when they do not.
+    //
+    // Several plain sentences about what has just been worked out explain themselves
+    // and are the best thing said on a whole drive — those go out as written. A single
+    // line does not: "eleven records still closing together" is true, and from the
+    // driver's seat it is a riddle, because everything that would make sense of it —
+    // what was being looked at, what came back, what it means — is in the work around
+    // it rather than in the line.
+    //
+    // So a lone remark is handed to the summary along with everything else that has
+    // happened since the last one, and what comes back is used if it is any good. The
+    // remark itself is the fallback, which is no worse than today.
+    const own = itsOwnWords(notes);
+    const explainsItself = own.split(/(?<=[.?!])\s+/).filter(Boolean).length > 1;
+    const summary = explainsItself
+      ? own
+      : ((await soFar(notes.join("\n"), own)) || own);
     if (summary) note("what has been going on", summary);
     return send(res, 200, { summary, steps: notes.length });
   }
