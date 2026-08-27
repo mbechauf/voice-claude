@@ -115,7 +115,18 @@ export function whatHasHappened(project) {
   if (!job) return [];
   const taken = job.notes;
   job.notes = [];
+  // Kept as well as handed over. Asking used to empty the account completely, so a
+  // question that then sat waiting on something long — a job running in the background,
+  // a box starting up — had nothing left to say about itself and said nothing at all,
+  // for minutes at a time. Silence is the one thing that cannot be told apart from a
+  // fault, and it was exactly the stretch somebody most wanted told about.
+  if (taken.length) job.lately = taken.slice(-24);
   return taken;
+}
+
+/** Where it had got to, for when nothing new has happened since it was last asked. */
+export function whereItHadGotTo(project) {
+  return answering.get(project)?.lately ?? [];
 }
 
 /**

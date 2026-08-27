@@ -31,7 +31,8 @@ import {
   WHAT_EACH_DOES,
 } from "./config.mjs";
 import {
-  forgetConversation, isBusy, itsOwnWords, startWork, stopWork, whatHasHappened, whyItStopped,
+  forgetConversation, isBusy, itsOwnWords, startWork, stopWork, whatHasBeenGoingOn, whatHasHappened,
+  whereItHadGotTo, whyItStopped,
 } from "./claude-bridge.mjs";
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
@@ -665,7 +666,12 @@ async function handle(req, res) {
   // account is emptied by the asking, so nothing is announced twice and each summary
   // covers exactly the stretch since the last one.
   if (url.pathname === "/so-far" && req.method === "POST") {
-    const notes = whatHasHappened(project);
+    let notes = whatHasHappened(project);
+    // Nothing new since last time does not mean nothing is happening — it usually means
+    // something long is running and there has been nothing to report for a while. Saying
+    // where it had got to beats saying nothing, and nothing is what somebody in a car
+    // hears as the app having died.
+    if (!notes.length) notes = whereItHadGotTo(project);
     if (!notes.length) return send(res, 200, { summary: "" });
     // Its own words when they carry their own context, and a summary when they do not.
     //
