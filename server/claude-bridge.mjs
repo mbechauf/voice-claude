@@ -147,6 +147,50 @@ export function whatHasHappened(project) {
  * summariser is now only for the case it is actually needed for: a long stretch of
  * silent work with nothing said during it.
  */
+/**
+ * What has been going on, told as the steps themselves, in order.
+ *
+ * This exists because a small model asked to summarise the machinery got it wrong — it
+ * announced that something had been rewritten and was failing to find a browser, when
+ * what had actually happened was a panel being rebuilt as labelled cards and checked.
+ * Meanwhile the steps on the screen read perfectly well on their own.
+ *
+ * So they are used as they are. Nothing here invents anything: every phrase is one
+ * that was already shown, joined in the order it happened, with repeats dropped. It is
+ * plainer than a written summary and it cannot be wrong.
+ *
+ * Long enough to actually say something. There are thirty seconds between these and a
+ * person can listen for twenty of them, so cutting it to one line was throwing away
+ * the very thing that was wanted.
+ */
+export function whatHasBeenGoingOn(notes, mostWords = 60) {
+  const steps = [];
+  for (const line of notes ?? []) {
+    const text = String(line);
+    if (!text.startsWith("Step: ")) continue;
+    const phrase = text.slice("Step: ".length).trim();
+    if (!phrase || phrase === steps[steps.length - 1]) continue;
+    steps.push(phrase);
+  }
+  if (!steps.length) return "";
+
+  // The newest are the ones worth having: the older ones have been overtaken, and by
+  // the time somebody hears this they want to know where it has got to.
+  const kept = [];
+  let words = 0;
+  for (const phrase of [...steps].reverse()) {
+    const cost = phrase.split(/\s+/).length;
+    if (words + cost > mostWords && kept.length) break;
+    kept.unshift(phrase);
+    words += cost;
+  }
+
+  const spoken = kept.map((one) => one.charAt(0).toLowerCase() + one.slice(1));
+  const last = spoken.pop();
+  const all = spoken.length ? `${spoken.join(", ")}, then ${last}` : last;
+  return `${all.charAt(0).toUpperCase()}${all.slice(1)}.`;
+}
+
 export function itsOwnWords(notes) {
   for (const line of [...(notes ?? [])].reverse()) {
     if (!String(line).startsWith("Said: ")) continue;
@@ -418,6 +462,11 @@ async function askTheOpenSession({ project, opening, resume, emit, spoken = fals
       } else if (message.kind === "step") {
         noteDown(job_, `Did: ${message.name} ${JSON.stringify(message.input ?? {}).slice(0, 300)}`);
         const phrase = describeTool(message.name, message.input ?? {});
+        // Kept as well, in the words a person would use. These are already plain
+        // English — "rewrite the fact panel as labelled rule cards" — and they are what
+        // the screen shows. Anything trying to say what has been going on should be
+        // built out of these rather than out of the machinery underneath them.
+        noteDown(job_, `Step: ${phrase}`);
         if (phrase !== job_.lastPhrase) {
           job_.lastPhrase = phrase;
           emit("progress", phrase);

@@ -847,6 +847,30 @@ async function checkItRemembersPerProject() {
     // careful three-sentence correction, with none of the correction attached. Out of
     // its paragraph it meant nothing, and it sounded like the machine talking nonsense
     // to itself between questions.
+    // What has been going on, told as the steps themselves. Taken from a real drive
+    // where a small model announced that something had been rewritten and was failing
+    // to find a browser — while what had actually happened was a panel being rebuilt as
+    // labelled cards and checked, and the steps on the screen read perfectly well.
+    const { whatHasBeenGoingOn } = await import("./claude-bridge.mjs");
+    const doing = whatHasBeenGoingOn([
+      "Step: finding the rule explorer builder",
+      "Step: reading the rule card renderer",
+      "Said: something it said in passing",
+      "Step: rewriting the fact panel as labelled rule cards",
+      "Step: rewriting the fact panel as labelled rule cards",
+      "Step: checking the page parses",
+    ]);
+    check("what has been going on is told as the steps, in order",
+      doing.startsWith("Finding the rule explorer builder") && doing.endsWith("checking the page parses."), doing);
+    check("and a step repeated is not said twice",
+      doing.split("rewriting the fact panel").length === 2, doing);
+    check("it is long enough to be worth listening to",
+      doing.split(/\s+/).length > 12, `${doing.split(/\s+/).length} words`);
+    check("with nothing done, there is nothing to tell", whatHasBeenGoingOn([]) === "");
+    check("the newest survive when there are too many",
+      whatHasBeenGoingOn(["Step: one two three four five", "Step: six seven eight nine ten"], 6)
+        .startsWith("Six seven"));
+
     // Whole or not at all. What was read out before was the last line on its own, which
     // meant nothing; what should be read out is the lot, which means everything.
     const careful = itsOwnWords([

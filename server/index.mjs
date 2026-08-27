@@ -681,9 +681,16 @@ async function handle(req, res) {
     // remark itself is the fallback, which is no worse than today.
     const own = itsOwnWords(notes);
     const explainsItself = own.split(/(?<=[.?!])\s+/).filter(Boolean).length > 1;
+    // The steps as they happened, which is what the screen shows and what reads best.
+    // A written summary is only reached for when there are no steps to tell — a small
+    // model asked to make sense of the machinery gets it wrong, confidently, and a
+    // wrong account of what is going on is worse than a plain one.
+    const asItHappened = whatHasBeenGoingOn(notes);
     const summary = explainsItself
       ? own
-      : ((await soFar(notes.join("\n"), own)) || own);
+      : (asItHappened
+          ? (own ? `${own} ${asItHappened}` : asItHappened)
+          : ((await soFar(notes.join("\n"), own)) || own));
     if (summary) note("what has been going on", summary);
     return send(res, 200, { summary, steps: notes.length });
   }
