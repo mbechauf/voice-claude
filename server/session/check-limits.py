@@ -265,9 +265,14 @@ async def main():
         async def disconnect(self):
             self.closed = True
 
-    class Said:
+    class Block(holder.TextBlock):
         def __init__(self, text):
             self.text = text
+
+    class Said(holder.AssistantMessage):
+        def __init__(self, text):
+            self.text = text
+            self.content = [Block(text)]
 
     class Ended(holder.ResultMessage):
         def __init__(self, text):
@@ -276,8 +281,12 @@ async def main():
 
     stray = [Said("the background job finished"), Ended("the background job finished")]
     chatty = Chatty(stray)
-    left = await holder.clear_the_line(chatty)
+    left, said_meanwhile = await holder.clear_the_line(chatty)
     check("a reply nobody asked for is cleared before the question goes out", left == 2, f"{left}")
+    # And kept. What finished while nobody was asking is the thing somebody waiting on
+    # it actually wants; telling them only that it happened is the worst of both.
+    check("and what it said is kept, not just counted",
+          "the background job finished" in said_meanwhile, said_meanwhile)
 
     heard = Nowhere()
     sessions = holder.Sessions()
@@ -286,14 +295,24 @@ async def main():
     chatty = Chatty(stray)
     sessions.open = {"/somewhere": chatty}
     await holder.run_the_question(sessions, heard, "/somewhere", chatty, {"ask": "which three fixes"})
-    answers = [line for line in heard.said if "answer to" in line]
+    # The one that matters: the answer reported as finished is the answer to the
+    # question that was asked, not to something else that happened to be waiting.
+    import json as _json
+    finals = []
+    for line in heard.said:
+        try:
+            was = _json.loads(line)
+        except Exception:
+            continue
+        if was.get("kind") == "done":
+            finals.append(was.get("text", ""))
     check(
         "so the answer that comes back is to the question that was asked",
-        len(answers) == 1 and "which three fixes" in answers[0],
-        answers[0][:120] if answers else "nothing came back",
+        len(finals) == 1 and "which three fixes" in finals[0],
+        finals[0][:120] if finals else "nothing came back",
     )
-    check("and being skipped past is said out loud rather than hidden",
-          any("on its own" in line for line in heard.spoken()))
+    check("and what finished is read out rather than hidden",
+          any("the background job finished" in line for line in heard.spoken()), f"{heard.spoken()}")
 
     # And the ordinary case pays nothing and says nothing: a clear line stays quiet.
     quiet = Chatty([])

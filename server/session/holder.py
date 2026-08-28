@@ -320,6 +320,7 @@ async def clear_the_line(client):
     waiting when we ask cannot be an answer to what we are about to ask.
     """
     dropped = 0
+    words = []
     mid_turn = False
     started = time.monotonic()
     while time.monotonic() - started < GIVE_UP_S:
@@ -327,8 +328,26 @@ async def clear_the_line(client):
         if said is None:
             break
         dropped += 1
+        # Kept, not merely counted. This is a real report on something that finished —
+        # usually the very thing somebody has been waiting on — and it was written to
+        # nobody. Throwing it away and saying "something finished" is the worst of both:
+        # they know they missed something and cannot have it.
+        words.extend(plain_text(said))
         mid_turn = not isinstance(said, ResultMessage)
-    return dropped
+    return dropped, " ".join(w for w in words if w).strip()
+
+
+def plain_text(message):
+    """Whatever a message says in words, and nothing it says in machinery."""
+    said = []
+    if isinstance(message, ResultMessage):
+        # The result repeats the last thing said, so it is left out to avoid saying it
+        # twice; it is only used when nothing else came through at all.
+        return said
+    for block in getattr(message, "content", []) or []:
+        if isinstance(block, TextBlock) and block.text.strip():
+            said.append(block.text.strip())
+    return said
 
 
 async def rebuild_if_full(sessions, writer, project):
@@ -433,14 +452,24 @@ def waiting_note(project):
 async def run_the_question(sessions, writer, project, client, request):
     # Before asking, and never after: what is already there is the giveaway, and after
     # the answer there is no way to tell a stray reply from one still arriving.
-    dropped = await clear_the_line(client)
+    dropped, said_meanwhile = await clear_the_line(client)
     if dropped:
         print(f"cleared {dropped} left over on {project} before asking", flush=True)
-        # Said out loud, because it is not nothing. Something ran to completion while
-        # nobody was listening, and its report is now only in the conversation's memory
-        # rather than in anybody's ears. Better to know it happened and be able to ask.
-        speak(writer, "Something finished on its own while nobody was asking. "
-                      "I've left that out and answered you instead.")
+        # Read out, not merely reported. Something ran to completion while nobody was
+        # asking, and what it said about it is exactly what somebody waiting on it
+        # wanted — usually the result of the very thing they were waiting for. Saying
+        # only that it happened tells them they missed something and does not let them
+        # have it.
+        #
+        # Trimmed, because it can run long and this is arriving in front of the answer
+        # to the question actually asked. Enough to know what came of it; the
+        # conversation still remembers all of it if they want more.
+        if said_meanwhile:
+            speak(writer, "While you were away, this finished. "
+                          + said_meanwhile[:900])
+        else:
+            speak(writer, "Something finished on its own while nobody was asking, "
+                          "but it did not say what.")
 
     await client.query(request["ask"])
     final = ""
