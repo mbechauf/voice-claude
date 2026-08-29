@@ -111,6 +111,7 @@ class Sessions:
         self.answering = {}     # project -> how many questions are in flight on it
         self.turns = {}         # project -> whose turn it is on that one conversation
         self.mail = {}          # project -> what it said when nobody was asking
+        self.wanted = {}        # project -> how many questions are on their way in
         self.carrying_on = {}   # project -> what a rebuilt conversation must read first
 
     async def client_for(self, project, resume=None):
@@ -227,9 +228,15 @@ async def answer(sessions, writer, request):
     # first place. Giving up and saying so is always better than waiting silently: the
     # person is in a car and cannot see that anything is wrong.
     turn = sessions.turns.setdefault(project, asyncio.Lock())
+    # Said before anything is waited for. Whoever else might be reading this
+    # conversation has to know a question is coming the instant it arrives, not once
+    # the turn has changed hands — the gap between those two is small and it is exactly
+    # where somebody else's reader can settle in and start eating the answer.
+    sessions.wanted[project] = sessions.wanted.get(project, 0) + 1
     try:
         await asyncio.wait_for(turn.acquire(), timeout=WAIT_FOR_TURN_S)
     except asyncio.TimeoutError:
+        sessions.wanted[project] = max(0, sessions.wanted.get(project, 1) - 1)
         tell(writer, "error", text="that project is still busy with the question before this one")
         tell(writer, "done")
         return
@@ -241,6 +248,7 @@ async def answer(sessions, writer, request):
         await run_the_question(sessions, writer, project, client, request)
     finally:
         turn.release()
+        sessions.wanted[project] = max(0, sessions.wanted.get(project, 1) - 1)
         left = sessions.answering.get(project, 1) - 1
         if left > 0:
             sessions.answering[project] = left
@@ -580,14 +588,26 @@ async def listen_while_idle(sessions):
             turn = sessions.turns.setdefault(project, asyncio.Lock())
             if turn.locked():
                 continue
+            if sessions.wanted.get(project):
+                continue
             await turn.acquire()
             try:
+                # One thing, briefly, and then the turn goes back. Never a long wait and
+                # never a second helping.
+                #
+                # This listener reads from the same one stream the answers come down,
+                # and that makes it dangerous in a way nothing else here is: anything it
+                # takes is something a person never hears. It settled in mid-turn and
+                # ate pieces of live answers, which sounded exactly like a slow machine
+                # rather than like something reading over your shoulder.
+                #
+                # So it stands aside for anybody at all. If a question is on its way in,
+                # it does not even look.
                 said = await next_thing_said(client, 0.05)
-                while said is not None:
+                if said is not None:
                     for words in plain_text(said):
                         sessions.mail.setdefault(project, []).append(words)
                         print(f"heard while idle on {project}: {words[:80]}", flush=True)
-                    said = await next_thing_said(client, MID_TURN_S if not isinstance(said, ResultMessage) else 0.05)
             except Exception as err:  # noqa: BLE001
                 print(f"listening while idle went wrong: {err}", flush=True)
             finally:

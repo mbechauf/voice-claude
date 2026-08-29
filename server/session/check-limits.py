@@ -9,6 +9,7 @@
 # and a test that needs a subscription to run is a test nobody runs.
 
 import asyncio
+import contextlib
 import sys
 import types
 from pathlib import Path
@@ -319,6 +320,28 @@ async def main():
     calm = Nowhere()
     await holder.run_the_question(sessions, calm, "/somewhere", quiet, {"ask": "what changed"})
     check("a conversation with nothing waiting is not announced at all", not calm.spoken())
+
+    # ---- the listener must never eat a live answer ----
+    #
+    # It reads from the same one stream the answers come down, which makes it dangerous
+    # in a way nothing else here is: anything it takes is something a person never
+    # hears. It has to stand aside for a question that has merely been asked, not only
+    # for one already being answered — the gap between those two is exactly where it
+    # settled in and started eating.
+    sessions = holder.Sessions()
+    live = Chatty([Said("part of a live answer"), Ended("part of a live answer")])
+    sessions.open = {"/somewhere": live}
+    sessions.wanted["/somewhere"] = 1          # a question has arrived, not yet started
+    listening = asyncio.create_task(holder.listen_while_idle(sessions))
+    await asyncio.sleep(holder.LISTEN_EVERY_S * 2.5)
+    listening.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await listening
+    check(
+        "a question on its way in stops the listener reading at all",
+        not sessions.mail.get("/somewhere") and len(live.queue) == 2,
+        f"{sessions.mail.get('/somewhere')}, {len(live.queue)} left",
+    )
 
     # ---- and it can say what it is holding ----
     sessions = holder.Sessions()
