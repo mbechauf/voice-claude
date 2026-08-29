@@ -2083,7 +2083,10 @@ function splitFrontEnd() {
     if (!question.length) {
       // Nothing to send means you wanted quiet: hush, and drop what is running.
       mouth?.silence();
-      if (working) { stopWork(); working = false; stopTicking(); log("stopped", "work"); }
+      // Named, not just noted. A bare "stopped" on the screen says nothing about who
+      // stopped it, and a question abandoned for other reasons entirely reads exactly
+      // the same — which sent somebody looking for a fault they had caused themselves.
+      if (working) { stopWork(); working = false; stopTicking(); log("stopped, because you asked me to", "work"); }
       sound.note("wiped");
       idleState();
       return;
