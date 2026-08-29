@@ -398,6 +398,30 @@ function takeTheNextOne() {
 // So the queue is never told when to run. It looks for itself.
 setInterval(takeTheNextOne, 1_000).unref();
 
+// A conversation can finish something while nobody is asking it anything — a job left
+// running comes back, and it writes a proper report on it to nobody. Waiting for the
+// next question to hand that over means somebody waiting on that very job hears
+// nothing until they give up and ask, which is the wrong way round entirely.
+//
+// So it is asked for on a clock, and read out the moment it turns up. The asking is
+// empty nearly every time and costs a message over a local socket, which is why it can
+// afford to be frequent.
+setInterval(async () => {
+  if (!openSessions.isInstalled()) return;
+  try {
+    const said = await openSessions.anythingSaidMeanwhile(project);
+    for (const words of said) {
+      if (!words?.trim()) continue;
+      console.log(`  finished while waiting: ${words.slice(0, 120)}`);
+      note("finished while waiting", words);
+      broadcast("notice", `That thing you were waiting on has finished. ${words.slice(0, 900)}`, "spoken");
+    }
+  } catch {
+    // The helper being busy or absent is not worth a word: the next question picks up
+    // anything missed, exactly as it did before this existed.
+  }
+}, 4_000).unref();
+
 // ------------------------------------------------------------------ helpers
 
 function readBody(req) {

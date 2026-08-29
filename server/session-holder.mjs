@@ -209,6 +209,19 @@ export function ask({ project, ask: question, resume = null }, onMessage) {
   });
 }
 
+/**
+ * What a conversation said while nobody was asking it anything.
+ *
+ * A job finishing writes a real report, and until something asks for it, it sits
+ * unread. This is the asking. Empty nearly every time, and cheap enough to do on a
+ * clock for that reason.
+ */
+export function anythingSaidMeanwhile(project) {
+  return askQuietly({ what: "mail", project }).then((said) =>
+    Array.isArray(said?.said) ? said.said : [],
+  );
+}
+
 /** A small question to the holder that expects one line back. Null if it is not there. */
 function askQuietly(request, patience = 2_000) {
   return new Promise((resolve) => {

@@ -110,6 +110,7 @@ class Sessions:
         self.used = {}          # project -> when it was last spoken to
         self.answering = {}     # project -> how many questions are in flight on it
         self.turns = {}         # project -> whose turn it is on that one conversation
+        self.mail = {}          # project -> what it said when nobody was asking
         self.carrying_on = {}   # project -> what a rebuilt conversation must read first
 
     async def client_for(self, project, resume=None):
@@ -525,6 +526,12 @@ async def serve(reader, writer, sessions):
             with contextlib.suppress(Exception):
                 tell(writer, "stopping")
                 await writer.drain()
+        elif request.get("what") == "mail":
+            # What it said while nobody was asking, and emptied by the asking so
+            # nothing is ever said twice.
+            project = request.get("project")
+            waiting = sessions.mail.pop(project, []) if project else []
+            tell(writer, "mail", said=waiting)
         elif request.get("what") == "forget":
             await sessions.close(request["project"])
             tell(writer, "forgotten")
@@ -545,6 +552,46 @@ async def serve(reader, writer, sessions):
             writer.close()
         except Exception:
             pass
+
+
+# How often to look in on a conversation nobody is asking anything. Often enough that a
+# job finishing is heard about while somebody still cares, rare enough to be invisible.
+LISTEN_EVERY_S = float(os.environ.get("VOICE_CLAUDE_LISTEN_EVERY", "2"))
+
+
+async def listen_while_idle(sessions):
+    """Hear what a conversation says when nobody asked it anything.
+
+    A conversation does not only speak when spoken to. A job left running finishes, it
+    is told so, and it answers — writing a real report to nobody, because nothing is
+    reading between questions. Until now that report sat in the queue until the next
+    question came along, which meant somebody waiting on the very thing it was about
+    heard nothing until they gave up and asked.
+
+    So something listens. It takes the turn like any other reader, so it can never read
+    from underneath a question being answered, and it gives it straight back — holding
+    it would be the same fault one level up.
+    """
+    while True:
+        await asyncio.sleep(LISTEN_EVERY_S)
+        for project, client in list(sessions.open.items()):
+            if sessions.answering.get(project):
+                continue
+            turn = sessions.turns.setdefault(project, asyncio.Lock())
+            if turn.locked():
+                continue
+            await turn.acquire()
+            try:
+                said = await next_thing_said(client, 0.05)
+                while said is not None:
+                    for words in plain_text(said):
+                        sessions.mail.setdefault(project, []).append(words)
+                        print(f"heard while idle on {project}: {words[:80]}", flush=True)
+                    said = await next_thing_said(client, MID_TURN_S if not isinstance(said, ResultMessage) else 0.05)
+            except Exception as err:  # noqa: BLE001
+                print(f"listening while idle went wrong: {err}", flush=True)
+            finally:
+                turn.release()
 
 
 async def keep_it_tidy(sessions):
@@ -569,14 +616,18 @@ async def main():
     )
     print(f"session holder ready on {SOCKET}", flush=True)
     tidying = asyncio.create_task(keep_it_tidy(sessions))
+    listening = asyncio.create_task(listen_while_idle(sessions))
     async with server:
         # Waits to be told to stop rather than running forever, so that being asked to
         # go means closing the conversations properly instead of being killed with them
         # still open underneath.
         await stopping.wait()
     tidying.cancel()
+    listening.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await tidying
+    with contextlib.suppress(asyncio.CancelledError):
+        await listening
     await sessions.close_everything()
     print("session holder stopped", flush=True)
 
