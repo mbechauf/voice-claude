@@ -3116,6 +3116,16 @@ function splitFrontEnd() {
     // The same thing the closing phrase does, for when the road is too loud to be
     // heard over. Never needed, always there.
     tap() {
+      // Paused is the one state a tap can obviously mean one thing in. Nothing else
+      // the button does applies while it is deaf — it cannot send, it cannot be told
+      // to be quiet, and there is nothing on the screen to confirm. The word still
+      // works, and now so does the button, which is what somebody reaches for when
+      // they are not sure the word was heard.
+      if (heldOff) {
+        trace("tapped: unpausing");
+        listenAgain();
+        return;
+      }
       // A browser that refused to make sound to a page nobody had touched will hand
       // it over the moment somebody does. So the first tap after a refusal buys the
       // voice back rather than sending, which is the only thing it could be for.
