@@ -409,12 +409,18 @@ setInterval(takeTheNextOne, 1_000).unref();
 setInterval(async () => {
   if (!openSessions.isInstalled()) return;
   try {
-    const said = await openSessions.anythingSaidMeanwhile(project);
-    for (const words of said) {
-      if (!words?.trim()) continue;
-      console.log(`  finished while waiting: ${words.slice(0, 120)}`);
-      note("finished while waiting", words);
-      broadcast("notice", `That thing you were waiting on has finished. ${words.slice(0, 900)}`, "spoken");
+    // Every project, not only the one being stood in. Something finishing where you
+    // are would surface the moment you asked anything there; something finishing
+    // elsewhere is the one nothing would ever tell you about.
+    const everywhere = await openSessions.anythingSaidAnywhere();
+    for (const [where, said] of Object.entries(everywhere)) {
+      for (const words of said) {
+        if (!words?.trim()) continue;
+        const whose = where === project ? "" : ` on ${nameOf(where)}`;
+        console.log(`  finished while waiting${whose}: ${words.slice(0, 120)}`);
+        note("finished while waiting", `${nameOf(where)}: ${words}`);
+        broadcast("notice", `That thing you were waiting on${whose} has finished. ${words.slice(0, 900)}`, "spoken");
+      }
     }
   } catch {
     // The helper being busy or absent is not worth a word: the next question picks up

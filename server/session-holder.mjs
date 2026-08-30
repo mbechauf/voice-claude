@@ -222,6 +222,17 @@ export function anythingSaidMeanwhile(project) {
   );
 }
 
+/**
+ * The same question, asked of every conversation at once.
+ *
+ * A job finishing on the project you are standing in is the one you would find out
+ * about anyway, the moment you asked anything. The one that matters is the job
+ * finishing somewhere else — that is the one nothing would ever tell you about.
+ */
+export function anythingSaidAnywhere() {
+  return askQuietly({ what: "mail" }).then((said) => said?.everywhere ?? {});
+}
+
 /** A small question to the holder that expects one line back. Null if it is not there. */
 function askQuietly(request, patience = 2_000) {
   return new Promise((resolve) => {

@@ -537,9 +537,19 @@ async def serve(reader, writer, sessions):
         elif request.get("what") == "mail":
             # What it said while nobody was asking, and emptied by the asking so
             # nothing is ever said twice.
+            # Asked for one project or for all of them. All of them matters: a job
+            # finishing somewhere you are not standing is exactly the one you cannot
+            # see, and it is the one worth being told about.
             project = request.get("project")
-            waiting = sessions.mail.pop(project, []) if project else []
-            tell(writer, "mail", said=waiting)
+            if project:
+                tell(writer, "mail", said=sessions.mail.pop(project, []))
+            else:
+                everywhere = {}
+                for where in list(sessions.mail):
+                    said = sessions.mail.pop(where, [])
+                    if said:
+                        everywhere[where] = said
+                tell(writer, "mail", everywhere=everywhere)
         elif request.get("what") == "forget":
             await sessions.close(request["project"])
             tell(writer, "forgotten")
