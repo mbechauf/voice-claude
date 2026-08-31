@@ -37,6 +37,7 @@ import {
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
 import * as ear from "./ear.mjs";
+import { NUDGE, soundsLikeAPromise, worthWaking } from "./promises.mjs";
 import * as openSessions from "./session-holder.mjs";
 import {
   ACROSS_RESTARTS,
@@ -360,6 +361,9 @@ async function put(request, how, { alreadyTidied = false, at = project } = {}) {
       console.log(`  ${kind}: ${text.slice(0, 120)}`);
       broadcast(kind, text, how);
       // The moment this one is done, whatever was typed while it ran gets its turn.
+      // An answer that undertakes to come back is written down, because nothing else
+      // will ever make it happen — see the note on the chasing below.
+      if (kind === "final" && soundsLikeAPromise(text)) rememberThePromise(at, text);
       if (kind === "final" || kind === "error") setTimeout(takeTheNextOne, 0);
     },
     {
@@ -427,6 +431,65 @@ setInterval(async () => {
     // anything missed, exactly as it did before this existed.
   }
 }, 4_000).unref();
+
+// ------------------------------------------------- keeping a promise it cannot keep
+//
+// "I'll tell you when it finishes" is a promise nothing can keep. A conversation only
+// runs when something arrives at it, and the only two things that arrive are a question
+// and a notification about a background command it started itself. Waiting on another
+// program, on a file, on a machine coming up — none of those wake anything, so the
+// promise is not broken so much as never attempted, and the person is left checking by
+// hand, which is the one thing the promise was meant to save.
+//
+// So the app goes and asks. Quietly, on a slow clock, and only about conversations that
+// actually undertook something.
+
+const promised = new Map();   // project -> { at, asked, tries }
+
+function rememberThePromise(where, said) {
+  promised.set(where, { at: Date.now(), asked: 0, tries: 0 });
+  console.log(`  noted a promise to come back on ${nameOf(where)}`);
+  note("a promise to come back", said.slice(0, 200));
+}
+
+// Slow on purpose. This costs a real question every time it fires — tokens, and a turn
+// on that conversation — so it sits far enough apart that it can never feel like
+// pestering, and gives up rather than chasing something forgotten for an hour.
+const CHASE_EVERY_MS = Number(process.env.VOICE_CLAUDE_CHASE_EVERY ?? 120_000);
+const GIVE_UP_AFTER = Number(process.env.VOICE_CLAUDE_CHASE_TIMES ?? 20);
+
+async function chaseAPromise() {
+  if (!openSessions.isInstalled() || !promised.size) return;
+  // Never while anything is being answered. Anything that reads the same conversation
+  // as a live answer can take pieces of it, and that has already happened once here —
+  // it sounded exactly like the machine being slow.
+  if (isBusy()) return;
+
+  for (const [where, state] of promised) {
+    if (Date.now() - (state.asked || state.at) < CHASE_EVERY_MS) continue;
+    if (state.tries >= GIVE_UP_AFTER) {
+      promised.delete(where);
+      console.log(`  gave up chasing ${nameOf(where)}`);
+      continue;
+    }
+    state.asked = Date.now();
+    state.tries += 1;
+    try {
+      const said = await openSessions.ask({ project: where, ask: NUDGE }, () => {});
+      if (!worthWaking(said)) continue;
+      promised.delete(where);
+      const whose = where === project ? "" : ` on ${nameOf(where)}`;
+      console.log(`  a promise kept${whose}: ${String(said).slice(0, 120)}`);
+      note("came back as promised", `${nameOf(where)}: ${said}`);
+      broadcast("notice", `${String(said).trim().slice(0, 900)}`, "spoken");
+    } catch {
+      // Busy, missing, or it would not answer. Nothing is said about any of those: the
+      // whole point is that this happens without anybody noticing until there is news.
+    }
+  }
+}
+
+setInterval(() => { chaseAPromise().catch(() => {}); }, 20_000).unref();
 
 // ------------------------------------------------------------------ helpers
 

@@ -604,6 +604,46 @@ function checkTheSoundItSends() {
   check("and silence stays silent", clipped[4] === 0);
 }
 
+// A promise to come back, and whether it is real.
+//
+// Everything here turns on being narrow. A promise missed is exactly today's behaviour
+// and costs nothing new; a promise imagined sends a question nobody asked to a
+// conversation nobody is talking to, and can interrupt somebody driving. So the cases
+// that must be refused are checked harder than the ones that must be caught.
+async function checkPromises() {
+  const { soundsLikeAPromise, worthWaking } = await import("./promises.mjs");
+
+  const said = [
+    // Straight from a real drive: the promise that was never kept.
+    ["it says it will come back with it", "It's running — roughly twenty-five minutes, and it'll tell us straight away how many rules name both halves. I'll come back to you with it.", true],
+    ["and the plainest form of all", "I'll let it run and tell you when it finishes.", true],
+    ["letting you know later", "The box is up. I'll let you know once the judging is done.", true],
+    ["an offer is not a promise", "Shall I tell you when it finishes?", false],
+    ["asking permission is not a promise", "Want me to tell you when the run is done?", false],
+    ["an answer that simply finished", "Done, and it backs you up. Of 902 rejected wordings, the checker was wrong on 582.", false],
+    ["talking about a promise already made", "I told you earlier that I would come back to you, and here it is.", false],
+    ["nothing at all", "", false],
+  ];
+  for (const [name, text, expected] of said) {
+    const got = soundsLikeAPromise(text);
+    check(`a promise to come back: ${name}`, got === expected, got === expected ? "" : `read as ${got}`);
+  }
+
+  // And what comes back when it is chased. "Nothing has changed" must stay silent, or
+  // this becomes a beep every two minutes about work nobody can hurry.
+  const back = [
+    ["still running, in the words it was asked for", "still running", false],
+    ["still running, dressed up", "Still going — about half done.", false],
+    ["real news", "It finished: all 63 judged, no empty answers this time.", true],
+    ["bad news is still news", "It failed — the box ran out of memory.", true],
+    ["nothing at all is not news", "", false],
+  ];
+  for (const [name, text, expected] of back) {
+    const got = worthWaking(text);
+    check(`what came back: ${name}`, got === expected, got === expected ? "" : `read as ${got}`);
+  }
+}
+
 function checkPickingAProject(names) {
   const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
   const source = page.match(/  function projectAtTheFront[\s\S]*?\n  }/);
@@ -1680,6 +1720,7 @@ try {
   checkAnswersGoBackTheWayTheyCame();
   await checkOneVoice();
   checkTheSoundItSends();
+  await checkPromises();
 
   const watchingPage = await (await fetch(`${base}/watching`)).text();
   check("serves the page a screen watches from", watchingPage.includes("/watching/since"));
