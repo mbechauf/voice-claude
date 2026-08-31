@@ -637,6 +637,13 @@ async function checkPromises() {
     ["real news", "It finished: all 63 judged, no empty answers this time.", true],
     ["bad news is still news", "It failed — the box ran out of memory.", true],
     ["nothing at all is not news", "", false],
+    // Every one of these ends the chasing if it is mistaken for news, and a promise
+    // dropped in silence is the exact fault this exists to fix. Two minutes of patience
+    // costs nothing by comparison.
+    ["still working on it", "Still working on it — no answer yet.", false],
+    ["nothing to report", "Nothing to report yet, it is part way through.", false],
+    ["no news", "No news — the run is still going.", false],
+    ["waiting on it", "Waiting on the box to come back.", false],
   ];
   for (const [name, text, expected] of back) {
     const got = worthWaking(text);

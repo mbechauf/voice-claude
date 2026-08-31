@@ -48,7 +48,12 @@ export function soundsLikeAPromise(text) {
 // What "nothing has changed" sounds like coming back. It is asked for in those words,
 // so a plain match is enough — and anything else at all is treated as news, which errs
 // towards telling somebody something rather than sitting on it.
-const NOTHING_YET = /^\W*(?:still running|still going|not (?:yet|finished|done)|nothing yet)\b/i;
+// Broadened deliberately. Getting this wrong in one direction costs another question
+// two minutes later, which nobody hears; getting it wrong in the other direction ends
+// the chasing on a reply that said nothing, and the promise is quietly dropped — which
+// is the very fault this whole thing exists to fix.
+const NOTHING_YET =
+  /^\W*(?:still (?:running|going|working|waiting|at it|in progress)|not (?:yet|finished|done|back)|nothing (?:yet|new|to report)|no news|in progress|running|waiting)\b/i;
 
 /** Is this answer worth reading out, or is it "nothing has changed"? */
 export function worthWaking(text) {
