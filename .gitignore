@@ -8,3 +8,4 @@ data/encoder-verdicts.json
 .cleanup/
 .session/
 __pycache__/
+.ear/
