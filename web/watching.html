@@ -166,6 +166,7 @@
       <label><input type="checkbox" id="follow" checked /> follow</label>
       <span id="count"></span>
     </header>
+    <div id="stillOut" class="queued" hidden></div>
     <main id="stream"><div class="waiting">Waiting for the conversation…</div></main>
 
     <footer>
@@ -199,6 +200,7 @@
       let shown = 0;
       let emptied = false;
       let quiet = false; // the last thing shown was a bare "thinking" marker
+      const stillOut = document.getElementById("stillOut");
       let waiting = null;
 
       const at = (when) =>
@@ -343,6 +345,20 @@
         // until something new starts here. Going quiet looks exactly like broken.
         if (seen.interrupted) stoppedBecause = seen.interrupted;
         if (seen.working) stoppedBecause = "";
+
+        // Everything still out, wherever it was started. The point of showing a count
+        // rather than only the newest is that a long job on another project is exactly
+        // the one that gets forgotten — it makes no noise and nothing on this screen
+        // would otherwise mention it.
+        const out = seen.stillWaiting ?? [];
+        if (out.length) {
+          stillOut.hidden = false;
+          stillOut.textContent = out.length === 1
+            ? `still waiting on ${out[0].project} — ${out[0].minutes} min`
+            : `still waiting on ${out.length} things — ${out.map((one) => `${one.project} ${one.minutes} min`).join(", ")}`;
+        } else {
+          stillOut.hidden = true;
+        }
 
         queued.hidden = !seen.queued && !stoppedBecause;
         if (seen.queued) {

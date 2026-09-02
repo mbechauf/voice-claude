@@ -446,6 +446,20 @@ setInterval(async () => {
 
 const promised = new Map();   // project -> { at, asked, tries }
 
+/**
+ * What is still out: things undertaken and not yet come back.
+ *
+ * Kept in the same place the chasing keeps it, because the two must never disagree —
+ * a screen saying something is still running while nothing is chasing it is worse than
+ * either on its own.
+ */
+function stillWaitingOn() {
+  return [...promised].map(([where, state]) => ({
+    project: nameOf(where),
+    minutes: Math.max(1, Math.round((Date.now() - state.at) / 60_000)),
+  }));
+}
+
 function rememberThePromise(where, said) {
   promised.set(where, { at: Date.now(), asked: 0, tries: 0 });
   console.log(`  noted a promise to come back on ${nameOf(where)}`);
@@ -490,6 +504,28 @@ async function chaseAPromise() {
 }
 
 setInterval(() => { chaseAPromise().catch(() => {}); }, 20_000).unref();
+
+// And said out loud now and again, because the whole risk with something running out of
+// sight is forgetting it is running. Short — the count and where, nothing else — and
+// never over an answer or while anything is being worked out. It is a reminder, not a
+// report: what actually happened arrives on its own when it happens.
+const REMIND_EVERY_MS = Number(process.env.VOICE_CLAUDE_REMIND_EVERY ?? 60_000);
+let remindedAt = 0;
+
+setInterval(() => {
+  const out = stillWaitingOn();
+  if (!out.length || isBusy()) return;
+  if (Date.now() - remindedAt < REMIND_EVERY_MS) return;
+  remindedAt = Date.now();
+  const where = out.map((one) => `${one.project}, ${one.minutes} minute${one.minutes === 1 ? "" : "s"} now`);
+  broadcast(
+    "notice",
+    out.length === 1
+      ? `Still waiting on ${where[0]}.`
+      : `Still waiting on ${out.length} things: ${where.join("; and ")}.`,
+    "spoken",
+  );
+}, 15_000).unref();
 
 // ------------------------------------------------------------------ helpers
 
@@ -631,6 +667,11 @@ async function handle(req, res) {
       // one of them quietly overwriting the other is exactly the kind of fault that
       // shows up as a blank screen and no reason.
       queued: waiting.filter((one) => one.at === where).length,
+      // Everything undertaken and not yet come back, whichever project it is on. A
+      // screen showing only what is happening here would go quiet while something it
+      // started elsewhere was still running, which is exactly how a long job gets
+      // forgotten about.
+      stillWaiting: stillWaitingOn(),
       // Why the last question here stopped with nothing to show, if it did. Said once
       // and then gone, so it is news rather than a permanent complaint.
       interrupted: whyItStopped(where),
