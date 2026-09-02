@@ -37,6 +37,7 @@ import {
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
 import * as ear from "./ear.mjs";
+import { stillRunning } from "./background.mjs";
 import { NUDGE, soundsLikeAPromise, worthWaking } from "./promises.mjs";
 import * as openSessions from "./session-holder.mjs";
 import {
@@ -454,10 +455,24 @@ const promised = new Map();   // project -> { at, asked, tries }
  * either on its own.
  */
 function stillWaitingOn() {
-  return [...promised].map(([where, state]) => ({
-    project: nameOf(where),
-    minutes: Math.max(1, Math.round((Date.now() - state.at) / 60_000)),
-  }));
+  const out = new Map();
+  // What was undertaken in words, which covers work nothing here can see — another
+  // program, a file being written, a machine coming up.
+  for (const [where, state] of promised) {
+    out.set(where, { project: nameOf(where), minutes: Math.max(1, Math.round((Date.now() - state.at) / 60_000)) });
+  }
+  // And what is provably still running: a job started in the background leaves a file
+  // of its own while it runs, and finishing is written into the conversation's record.
+  // The difference between those two lists is not a guess, which is what makes it worth
+  // having alongside the promises — and it catches work nobody said anything about.
+  for (const where of Object.values(PROJECTS).map((one) => one.at)) {
+    const jobs = stillRunning(where);
+    if (!jobs.length) continue;
+    const already = out.get(where);
+    const minutes = Math.max(jobs[0].minutes, already?.minutes ?? 0);
+    out.set(where, { project: nameOf(where), minutes, jobs: jobs.length });
+  }
+  return [...out.values()];
 }
 
 function rememberThePromise(where, said) {
@@ -517,7 +532,10 @@ setInterval(() => {
   if (!out.length || isBusy()) return;
   if (Date.now() - remindedAt < REMIND_EVERY_MS) return;
   remindedAt = Date.now();
-  const where = out.map((one) => `${one.project}, ${one.minutes} minute${one.minutes === 1 ? "" : "s"} now`);
+  const where = out.map((one) => {
+    const jobs = one.jobs ? `${one.jobs} job${one.jobs === 1 ? "" : "s"} on ` : "";
+    return `${jobs}${one.project}, ${one.minutes} minute${one.minutes === 1 ? "" : "s"} now`;
+  });
   broadcast(
     "notice",
     out.length === 1
