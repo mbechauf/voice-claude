@@ -208,6 +208,16 @@ export function since(project, place = null) {
   const now = from + Buffer.byteLength(complete, "utf8");
 
   const happenings = [];
+  // The app's own checking, and everything it caused, left out of what a person reads.
+  //
+  // It asks each conversation now and again whether anything is still running, which is
+  // the only way to know about work on another machine. But it is a question nobody
+  // asked, and on the screen it looked exactly like one somebody had — so the record of
+  // a real conversation was broken up every couple of minutes by a question the person
+  // never put and an answer they did not want. The result belongs on the panel that
+  // shows what is running, and nowhere else.
+  const OURS = /^This is the app checking/;
+  let skipping = false;
   for (const line of complete.split("\n")) {
     if (!line.trim()) continue;
     let entry;
@@ -216,7 +226,13 @@ export function since(project, place = null) {
     } catch {
       continue; // one unreadable line is not worth ending the stream over
     }
-    for (const happening of readable(entry)) happenings.push(happening);
+    for (const happening of readable(entry)) {
+      // Skipping starts at our own question and ends at the next real one — everything
+      // between belongs to it: what it looked at, and what it said back.
+      if (happening.kind === "asked") skipping = OURS.test(String(happening.text ?? ""));
+      if (skipping) continue;
+      happenings.push(happening);
+    }
   }
 
   return {
