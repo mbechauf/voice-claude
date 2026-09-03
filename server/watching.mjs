@@ -216,7 +216,11 @@ export function since(project, place = null) {
   // a real conversation was broken up every couple of minutes by a question the person
   // never put and an answer they did not want. The result belongs on the panel that
   // shows what is running, and nowhere else.
-  const OURS = /^This is the app checking/;
+  // Looked for anywhere in the question, not at the start of it. Every question carries
+  // a line in front saying which project it is on, so anchoring this to the beginning
+  // matched nothing — the question itself was hidden for another reason entirely, and
+  // everything it caused went on showing.
+  const OURS = /This is the app checking/;
   let skipping = false;
   for (const line of complete.split("\n")) {
     if (!line.trim()) continue;
