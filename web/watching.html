@@ -155,6 +155,18 @@
       }
       footer button:disabled { background: #2a2e36; color: var(--dim); cursor: default; }
       .queued { color: var(--dim); font-size: 12px; padding: 0 2px 6px; }
+      /* Along the top rather than under it, because there is a whole empty half of that
+         row and this was being squeezed into a line of its own above the conversation.
+         Brightened only when something is actually running — a thing that looks the
+         same whether or not it has anything to say is a thing nobody reads. */
+      .running { color: var(--dim); font-size: 12px; }
+      .running.on {
+        color: var(--ink);
+        background: rgba(120, 170, 255, 0.14);
+        border: 1px solid rgba(120, 170, 255, 0.3);
+        border-radius: 999px;
+        padding: 3px 10px;
+      }
     </style>
   </head>
   <body>
@@ -163,10 +175,10 @@
       <label>project <select id="project"></select></label>
       <span id="elsewhere"></span>
       <span class="spacer"></span>
+      <span id="stillOut" class="running"></span>
       <label><input type="checkbox" id="follow" checked /> follow</label>
       <span id="count"></span>
     </header>
-    <div id="stillOut" class="queued" hidden></div>
     <main id="stream"><div class="waiting">Waiting for the conversation…</div></main>
 
     <footer>
@@ -357,13 +369,11 @@
         // from a line that does not work. The whole value of this is being able to
         // trust it, and you cannot trust something you have never seen say anything.
         const out = seen.stillWaiting ?? [];
-        stillOut.hidden = false;
+        const jobs = out.reduce((n, one) => n + (one.jobs ?? 1), 0);
+        stillOut.className = out.length ? "running on" : "running";
         stillOut.textContent = !out.length
-          ? "nothing running in the background"
-          : out.length === 1
-            ? `still running: ${out[0].project} — ${out[0].minutes} min`
-            : `still running: ${out.map((one) => `${one.project} ${one.minutes} min`).join(", ")}`;
-        stillOut.style.opacity = out.length ? "1" : "0.45";
+          ? "nothing running"
+          : `${jobs} running — ${out.map((one) => `${one.project} ${one.minutes}m`).join(", ")}`;
 
         queued.hidden = !seen.queued && !stoppedBecause;
         if (seen.queued) {
