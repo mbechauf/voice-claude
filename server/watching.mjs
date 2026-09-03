@@ -81,14 +81,25 @@ export function fileFor(project, conversation) {
 // matter. A conversation can be replaced — a fresh start, or one that died and was
 // begun again — and a reader holding only a number would carry on counting into a
 // different file and show nonsense with total confidence.
-export const placeOf = (conversation, at) => `${conversation}@${at}`;
+// The place a reader has got to, and — since it is the only thing that travels there
+// and back — whether it stopped in the middle of an exchange it is leaving out.
+//
+// Without that second part the leaving-out could never work across more than one look:
+// each look starts afresh, so a question hidden in one and its answer arriving in the
+// next meant the answer was shown. Which is exactly what happened, twice.
+export const placeOf = (conversation, at, skipping = false) =>
+  `${conversation}@${at}${skipping ? "!skip" : ""}`;
 
 export function readPlace(place) {
-  const at = String(place ?? "").lastIndexOf("@");
-  if (at < 0) return { conversation: null, at: 0 };
+  const whole = String(place ?? "");
+  const skipping = whole.endsWith("!skip");
+  const trimmed = skipping ? whole.slice(0, -"!skip".length) : whole;
+  const at = trimmed.lastIndexOf("@");
+  if (at < 0) return { conversation: null, at: 0, skipping: false };
   return {
-    conversation: String(place).slice(0, at) || null,
-    at: Number(String(place).slice(at + 1)) || 0,
+    skipping,
+    conversation: trimmed.slice(0, at) || null,
+    at: Number(trimmed.slice(at + 1)) || 0,
   };
 }
 
@@ -221,7 +232,9 @@ export function since(project, place = null) {
   // matched nothing — the question itself was hidden for another reason entirely, and
   // everything it caused went on showing.
   const OURS = /This is the app checking/;
-  let skipping = false;
+  // Carried in from where the reader had got to, so an exchange being left out survives
+  // the gap between one look and the next.
+  let skipping = Boolean(asked.skipping) && !changed && asked.conversation === conversation;
   for (const line of complete.split("\n")) {
     if (!line.trim()) continue;
     let entry;
@@ -242,7 +255,7 @@ export function since(project, place = null) {
   return {
     conversation,
     happenings,
-    place: placeOf(conversation, now),
+    place: placeOf(conversation, now, skipping),
     startedAgain: changed || rewound,
     // Said plainly so a screen can show it rather than pretending the gap was not there.
     note: changed
