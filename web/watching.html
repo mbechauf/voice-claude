@@ -159,6 +159,32 @@
          row and this was being squeezed into a line of its own above the conversation.
          Brightened only when something is actually running — a thing that looks the
          same whether or not it has anything to say is a thing nobody reads. */
+      /* The conversation keeps the width it had; what is running goes in the room to
+         the right of it, which was empty. On a narrow screen the column drops away
+         entirely rather than squeezing the conversation into a gutter. */
+      .withAside { display: flex; flex: 1; min-height: 0; }
+      .withAside main { flex: 1; min-width: 0; }
+      aside {
+        width: 260px;
+        flex: none;
+        border-left: 1px solid var(--rule);
+        padding: 14px 16px;
+        overflow-y: auto;
+        font-size: 13px;
+      }
+      aside h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--dim);
+        margin: 0 0 10px;
+        font-weight: 600;
+      }
+      aside .job { padding: 8px 0; border-bottom: 1px solid var(--rule); }
+      aside .job .what { color: var(--ink); }
+      aside .job .where { color: var(--dim); font-size: 12px; }
+      aside .none { color: var(--dim); }
+      @media (max-width: 800px) { aside { display: none; } }
       .running { color: var(--dim); font-size: 12px; }
       .running.on {
         color: var(--ink);
@@ -179,7 +205,13 @@
       <label><input type="checkbox" id="follow" checked /> follow</label>
       <span id="count"></span>
     </header>
-    <main id="stream"><div class="waiting">Waiting for the conversation…</div></main>
+    <div class="withAside">
+      <main id="stream"><div class="waiting">Waiting for the conversation…</div></main>
+      <aside id="aside">
+        <h2>Running now</h2>
+        <div id="runningList" class="none">nothing running</div>
+      </aside>
+    </div>
 
     <footer>
       <div class="queued" id="queued" hidden></div>
@@ -213,6 +245,7 @@
       let emptied = false;
       let quiet = false; // the last thing shown was a bare "thinking" marker
       const stillOut = document.getElementById("stillOut");
+      const runningList = document.getElementById("runningList");
       let waiting = null;
 
       const at = (when) =>
@@ -368,12 +401,29 @@
         // appears when something is running is indistinguishable, on a quiet screen,
         // from a line that does not work. The whole value of this is being able to
         // trust it, and you cannot trust something you have never seen say anything.
+        // One line per thing, and the count is simply how many lines there are — so the
+        // number above and the list below can never disagree.
         const out = seen.stillWaiting ?? [];
-        const jobs = out.reduce((n, one) => n + (one.jobs ?? 1), 0);
         stillOut.className = out.length ? "running on" : "running";
-        stillOut.textContent = !out.length
-          ? "nothing running"
-          : `${jobs} running — ${out.map((one) => `${one.project} ${one.minutes}m`).join(", ")}`;
+        stillOut.textContent = out.length ? `${out.length} running` : "nothing running";
+        runningList.className = out.length ? "" : "none";
+        runningList.textContent = "";
+        if (!out.length) {
+          runningList.textContent = "nothing running";
+        } else {
+          for (const one of out) {
+            const row = document.createElement("div");
+            row.className = "job";
+            const what = document.createElement("div");
+            what.className = "what";
+            what.textContent = one.what;
+            const where = document.createElement("div");
+            where.className = "where";
+            where.textContent = `${one.project} — ${one.minutes} min`;
+            row.append(what, where);
+            runningList.append(row);
+          }
+        }
 
         queued.hidden = !seen.queued && !stoppedBecause;
         if (seen.queued) {

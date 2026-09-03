@@ -455,29 +455,25 @@ const promised = new Map();   // project -> { at, asked, tries }
  * either on its own.
  */
 function stillWaitingOn() {
-  const out = new Map();
-  // What was undertaken in words, which covers work nothing here can see — another
-  // program, a file being written, a machine coming up.
-  for (const [where, state] of promised) {
-    out.set(where, { project: nameOf(where), minutes: Math.max(1, Math.round((Date.now() - state.at) / 60_000)) });
-  }
-  // And what is provably still running: a job started in the background leaves a file
-  // of its own while it runs, and finishing is written into the conversation's record.
-  // The difference between those two lists is not a guess, which is what makes it worth
-  // having alongside the promises — and it catches work nobody said anything about.
+  // One entry per thing running, not one per project. A count of six above a list of
+  // three is the kind of arithmetic that makes somebody stop believing the whole panel,
+  // and it was caused by counting jobs while listing projects.
+  const out = [];
   for (const where of Object.values(PROJECTS).map((one) => one.at)) {
-    // Both kinds. One is a job started properly in the background, which leaves a file
-    // and is easy to count. The other is a command simply launched and left — a build,
-    // a long script — which leaves nothing, and is exactly what was being missed: an
-    // hour and a half of building while the screen said nothing was happening.
-    const jobs = [...stillRunning(where), ...programsItLeftRunning(where)];
-    if (!jobs.length) continue;
-    const already = out.get(where);
-    const minutes = Math.max(jobs[0].minutes, already?.minutes ?? 0);
-    out.set(where, { project: nameOf(where), minutes, jobs: jobs.length });
+    for (const job of stillRunning(where)) {
+      out.push({ project: nameOf(where), what: "a background job", minutes: job.minutes });
+    }
+    for (const job of programsItLeftRunning(where)) {
+      out.push({ project: nameOf(where), what: job.what, minutes: job.minutes });
+    }
   }
-  return [...out.values()];
+  for (const [where, state] of promised) {
+    const minutes = Math.max(1, Math.round((Date.now() - state.at) / 60_000));
+    out.push({ project: nameOf(where), what: "something it promised to come back on", minutes });
+  }
+  return out.sort((a, b) => b.minutes - a.minutes);
 }
+
 
 function rememberThePromise(where, said) {
   promised.set(where, { at: Date.now(), asked: 0, tries: 0 });
