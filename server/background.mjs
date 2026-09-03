@@ -15,6 +15,7 @@
 // insisting that four things are going when the truth is unknown is worse than a screen
 // that says nothing.
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -94,4 +95,64 @@ export function stillRunning(project, { now = Date.now(), oldest = 6 * 60 * 60 *
     .filter((one) => !told.includes(`<task-id>${one.id}</task-id>`))
     .map((one) => ({ id: one.id, minutes: Math.max(1, Math.round((now - one.at) / 60_000)) }))
     .sort((a, b) => b.minutes - a.minutes);
+}
+
+
+/**
+ * Programs this project started and left running.
+ *
+ * The other half of the count, and the half that was missing. A job started properly in
+ * the background leaves a file and is easy to count. A command simply launched and left
+ * — a build, a server, a long script — leaves nothing at all, and from outside the
+ * conversation looks completely idle while an hour of work is going on. That is exactly
+ * what was being missed: a build running for ninety minutes while the screen said
+ * nothing was happening.
+ *
+ * Recognised by where they are running from, which is the only honest signal available:
+ * a program launched out of this project's folder belongs to this project.
+ *
+ * Young ones only. Something up for days is a service somebody meant to leave running,
+ * not work anybody is waiting on, and counting those makes the number meaningless
+ * within a week.
+ */
+export function programsItLeftRunning(project, { youngerThanHours = 4 } = {}) {
+  let listed = "";
+  try {
+    listed = execFileSync("ps", ["-eo", "etime,command"], { encoding: "utf8", timeout: 2_000 });
+  } catch {
+    return [];
+  }
+
+  const out = [];
+  for (const line of listed.split("\n")) {
+    if (!line.includes(project)) continue;
+    const [elapsed, ...rest] = line.trim().split(/\s+/);
+    const command = rest.join(" ");
+    // Anything belonging to this app itself is not work somebody is waiting on.
+    if (/session\/holder\.py|cleanup\/worker\.py|ear\/listen\.py|server\/index\.mjs/.test(command)) continue;
+    // Nor the shells and snapshots a machine makes for itself while somebody works.
+    if (/\bzsh\b|\bbash\b|\bsh\b|snapshot|\bps\b|\bgrep\b/.test(command)) continue;
+    const minutes = minutesFrom(elapsed);
+    // Under a minute is something starting, not something to wait on, and it would
+    // flicker in and out of the count on every command anybody ran.
+    if (minutes === null || minutes < 1 || minutes > youngerThanHours * 60) continue;
+    out.push({ minutes, what: shortName(command) });
+  }
+  return out.sort((a, b) => b.minutes - a.minutes);
+}
+
+/** "01:28:15" and "03-06:59:26" and "16:11" into minutes. */
+function minutesFrom(elapsed) {
+  const [days, rest] = elapsed.includes("-") ? elapsed.split("-") : [null, elapsed];
+  const parts = rest.split(":").map(Number);
+  if (parts.some((one) => Number.isNaN(one))) return null;
+  const [hours, mins] = parts.length === 3 ? [parts[0], parts[1]] : [0, parts[0]];
+  return (Number(days ?? 0) * 24 + hours) * 60 + mins;
+}
+
+/** The name at the end of what was run, which is what a person would call it. */
+function shortName(command) {
+  const said = command.split(/\s+/).find((one) => /\.(mts|mjs|js|ts|py|sh)$/.test(one));
+  if (!said) return "something";
+  return said.split("/").pop().replace(/\.[a-z]+$/, "").replace(/[-_]+/g, " ");
 }

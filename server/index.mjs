@@ -37,7 +37,7 @@ import {
 import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
 import * as ear from "./ear.mjs";
-import { stillRunning } from "./background.mjs";
+import { programsItLeftRunning, stillRunning } from "./background.mjs";
 import { NUDGE, soundsLikeAPromise, worthWaking } from "./promises.mjs";
 import * as openSessions from "./session-holder.mjs";
 import {
@@ -466,7 +466,11 @@ function stillWaitingOn() {
   // The difference between those two lists is not a guess, which is what makes it worth
   // having alongside the promises — and it catches work nobody said anything about.
   for (const where of Object.values(PROJECTS).map((one) => one.at)) {
-    const jobs = stillRunning(where);
+    // Both kinds. One is a job started properly in the background, which leaves a file
+    // and is easy to count. The other is a command simply launched and left — a build,
+    // a long script — which leaves nothing, and is exactly what was being missed: an
+    // hour and a half of building while the screen said nothing was happening.
+    const jobs = [...stillRunning(where), ...programsItLeftRunning(where)];
     if (!jobs.length) continue;
     const already = out.get(where);
     const minutes = Math.max(jobs[0].minutes, already?.minutes ?? 0);
