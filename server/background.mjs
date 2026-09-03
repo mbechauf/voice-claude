@@ -125,7 +125,20 @@ export function programsItLeftRunning(project, { youngerThanHours = 4 } = {}) {
 
   const out = [];
   for (const line of listed.split("\n")) {
-    if (!line.includes(project)) continue;
+    // The folder, not merely those letters. One project's folder is the beginning of
+    // another's here — the advisor and the advisor's knowledge branch — so a plain
+    // search for the shorter name matched every program belonging to the longer one,
+    // and a build running in one appeared in both, with the same running time. What
+    // follows the name has to be the end of it or a slash.
+    // Judged on what is being run, not on anything the line happens to mention. A
+    // program borrows libraries from wherever they live, so a build in one project can
+    // name another project's folder in passing — which is how work in the knowledge
+    // branch appeared under the advisor as well, with the same running time, on a
+    // project nobody had touched in weeks.
+    const script = (line.match(/\S+\.(?:mts|mjs|cjs|js|ts|py|sh)\b/g) ?? []).find(
+      (one) => belongsTo(one, project) && !one.includes("/node_modules/"),
+    );
+    if (!script) continue;
     const [elapsed, ...rest] = line.trim().split(/\s+/);
     const command = rest.join(" ");
     // Anything belonging to this app itself is not work somebody is waiting on.
@@ -136,7 +149,7 @@ export function programsItLeftRunning(project, { youngerThanHours = 4 } = {}) {
     // Under a minute is something starting, not something to wait on, and it would
     // flicker in and out of the count on every command anybody ran.
     if (minutes === null || minutes < 1 || minutes > youngerThanHours * 60) continue;
-    out.push({ minutes, what: shortName(command) });
+    out.push({ minutes, what: shortName(script) });
   }
   return out.sort((a, b) => b.minutes - a.minutes);
 }
@@ -155,4 +168,16 @@ function shortName(command) {
   const said = command.split(/\s+/).find((one) => /\.(mts|mjs|js|ts|py|sh)$/.test(one));
   if (!said) return "something";
   return said.split("/").pop().replace(/\.[a-z]+$/, "").replace(/[-_]+/g, " ");
+}
+
+
+/** Is this command running out of that folder, rather than one whose name starts the same? */
+function belongsTo(line, project) {
+  let from = line.indexOf(project);
+  while (from !== -1) {
+    const after = line[from + project.length];
+    if (after === undefined || after === "/" || after === " " || after === '"' || after === "'") return true;
+    from = line.indexOf(project, from + 1);
+  }
+  return false;
 }
