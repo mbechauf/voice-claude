@@ -38,7 +38,7 @@ import { nowWorkingOn, recall, whereWeWere } from "./conversations.mjs";
 import { handOver, handoversRunning, sweepHandovers } from "./remote-control.mjs";
 import * as ear from "./ear.mjs";
 import { programsItLeftRunning, stillRunning } from "./background.mjs";
-import { NUDGE, soundsLikeAPromise, worthWaking } from "./promises.mjs";
+import { NUDGE, WHAT_IS_RUNNING, soundsLikeAPromise, whatItSaidIsRunning, worthWaking } from "./promises.mjs";
 import * as openSessions from "./session-holder.mjs";
 import {
   ACROSS_RESTARTS,
@@ -454,6 +454,42 @@ const promised = new Map();   // project -> { at, asked, tries }
  * a screen saying something is still running while nothing is chasing it is worse than
  * either on its own.
  */
+// What each conversation last said was running, and when it was asked. This is the
+// source now: the machine's own view is a cross-check, not the truth, because it cannot
+// see another machine at all.
+const running = new Map();   // project -> { line, asked }
+
+async function askWhatIsRunning() {
+  if (!openSessions.isInstalled() || isBusy()) return;
+  const open = await openSessions.whatIsOpen().catch(() => null);
+  for (const one of open?.open ?? []) {
+    if (one.answering) continue;
+    const known = running.get(one.project);
+    // Slowly while nothing is known to be going on, and rather less slowly once
+    // something is — this costs a real question every time it fires.
+    const gap = known?.line ? 120_000 : 300_000;
+    if (known && Date.now() - known.asked < gap) continue;
+    running.set(one.project, { line: known?.line ?? "", asked: Date.now() });
+    try {
+      const said = await openSessions.ask({ project: one.project, ask: WHAT_IS_RUNNING }, () => {});
+      const line = whatItSaidIsRunning(said);
+      const before = running.get(one.project)?.line ?? "";
+      running.set(one.project, { line, asked: Date.now() });
+      // Said out loud only when it changes. Repeating the same line every couple of
+      // minutes is the nagging this was careful to avoid everywhere else.
+      if (line && line !== before) {
+        broadcast("notice", `On ${nameOf(one.project)}: ${line}`, "spoken");
+      } else if (!line && before) {
+        broadcast("notice", `${nameOf(one.project)} has finished what it was running.`, "spoken");
+      }
+    } catch {
+      // Busy or absent. Nothing said; it is asked again next time round.
+    }
+  }
+}
+
+setInterval(() => { askWhatIsRunning().catch(() => {}); }, 30_000).unref();
+
 function stillWaitingOn() {
   // One entry per thing running, not one per project. A count of six above a list of
   // three is the kind of arithmetic that makes somebody stop believing the whole panel,
@@ -470,6 +506,12 @@ function stillWaitingOn() {
   for (const [where, state] of promised) {
     const minutes = Math.max(1, Math.round((Date.now() - state.at) / 60_000));
     out.push({ project: nameOf(where), what: "something it promised to come back on", minutes });
+  }
+  // And what the conversation itself says is running, which is the only thing that can
+  // see a machine other than this one.
+  for (const [where, state] of running) {
+    if (!state.line) continue;
+    out.push({ project: nameOf(where), what: state.line, minutes: Math.max(1, Math.round((Date.now() - state.asked) / 60_000)) });
   }
   return out.sort((a, b) => b.minutes - a.minutes);
 }

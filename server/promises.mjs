@@ -72,3 +72,30 @@ export const NUDGE =
   "You undertook to come back when something finished. If it has finished, or anything " +
   "has gone wrong, say so now in one or two plain spoken sentences. If it is still " +
   "running and there is nothing new, reply with exactly: still running";
+
+
+// Asking the one that knows.
+//
+// Everything else here infers what is running from what this Mac can see — files left
+// by background jobs, programs in its own process list. That misses the half that
+// matters: a download onto a rented box, a model loading onto a card. This machine has
+// nothing to show for those and never will.
+//
+// The conversation knows. It started the work, it knows where it is running, and asked
+// plainly it says so. So it is asked.
+export const WHAT_IS_RUNNING =
+  "This is the app checking, not the person — they have not said anything and are not " +
+  "waiting on this. In one short line: is anything still running or still being waited " +
+  "on, here or on any machine you started it on? If yes, say what it is and roughly how " +
+  "long it has been going. If nothing at all is running, reply with exactly: nothing running";
+
+/** Read an answer to that as either "nothing" or a plain line worth showing. */
+export function whatItSaidIsRunning(text) {
+  const said = String(text ?? "").trim();
+  if (!said) return "";
+  if (/^\W*nothing (?:running|is running|at all)\b/i.test(said)) return "";
+  // A whole paragraph is an answer to something else, or it has misunderstood. The
+  // panel wants a line, and a line is what it was asked for.
+  const first = said.split(/(?<=[.?!])\s+/)[0]?.trim() ?? said;
+  return first.split(/\s+/).length > 40 ? "" : first;
+}
