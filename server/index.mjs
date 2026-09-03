@@ -496,6 +496,11 @@ async function chaseAPromise() {
 
   for (const [where, state] of promised) {
     if (Date.now() - (state.asked || state.at) < CHASE_EVERY_MS) continue;
+    // Nothing to chase while the machine can see the job for itself. Finishing will
+    // wake the conversation on its own, and it will say so without being asked — so a
+    // question here would only be a question nobody needed, on a conversation that is
+    // going to speak anyway. Chasing is for work nothing tracks.
+    if (stillRunning(where).length) continue;
     if (state.tries >= GIVE_UP_AFTER) {
       promised.delete(where);
       console.log(`  gave up chasing ${nameOf(where)}`);
@@ -524,7 +529,10 @@ setInterval(() => { chaseAPromise().catch(() => {}); }, 20_000).unref();
 // sight is forgetting it is running. Short — the count and where, nothing else — and
 // never over an answer or while anything is being worked out. It is a reminder, not a
 // report: what actually happened arrives on its own when it happens.
-const REMIND_EVERY_MS = Number(process.env.VOICE_CLAUDE_REMIND_EVERY ?? 60_000);
+// Every three minutes, not every one. A reminder about something nobody can hurry is
+// worth hearing occasionally and is nagging the moment it is more often than that —
+// and the thing it is reminding about now announces itself the moment it finishes.
+const REMIND_EVERY_MS = Number(process.env.VOICE_CLAUDE_REMIND_EVERY ?? 180_000);
 let remindedAt = 0;
 
 setInterval(() => {
