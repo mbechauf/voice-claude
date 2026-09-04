@@ -210,6 +210,103 @@ function checkItKnowsItsOwnVoice() {
   return wrong.length === 0;
 }
 
+// Nothing this app says off its own bat may be spoken over somebody talking. That rule
+// only earns its keep if it is provable somewhere other than a car, so the holding part
+// is lifted out of the page and run against a clock we control.
+//
+// The fault it exists for: an announcement spoken mid-sentence does not interrupt a
+// sentence, it deletes one — words reach this app only at the pauses, so a sentence
+// still being said is written down nowhere at all.
+function checkAnnouncementsWaitForABreak() {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const source = page.match(/function heldBack\([\s\S]*?\n}/);
+  if (!source) {
+    check("what it says off its own bat waits for a break", false, "couldn't find that part of the page");
+    return;
+  }
+  const heldBack = new Function(`const trace = () => {}; ${source[0]}; return heldBack;`)();
+
+  // A clock and a diary, so nothing here waits on real seconds.
+  let clock = 0;
+  const timers = [];
+  const said = [];
+  let quiet = false;
+  const setTimeoutStub = (fn, ms) => { timers.push({ at: clock + ms, fn }); return timers.length; };
+  const clearTimeoutStub = () => {};
+  const tick = (ms) => {
+    const until = clock + ms;
+    for (;;) {
+      const next = timers.filter((t) => t.at <= until).sort((a, b) => a.at - b.at)[0];
+      if (!next) break;
+      timers.splice(timers.indexOf(next), 1);
+      clock = next.at;
+      next.fn();
+    }
+    clock = until;
+  };
+
+  // The page's own setTimeout, borrowed for the duration.
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  globalThis.setTimeout = setTimeoutStub;
+  globalThis.clearTimeout = clearTimeoutStub;
+
+  try {
+    const holding = heldBack({
+      ready: () => quiet,
+      say: (text) => said.push({ text, at: clock }),
+      leastGap: 60_000,
+      staleAfter: 600_000,
+      now: () => clock,
+    });
+
+    // Somebody is talking. It waits, however long that takes.
+    holding.offer("Still waiting on the knowledge app, 40 minutes now.");
+    tick(30_000);
+    check("it says nothing while somebody is talking", said.length === 0, `${said.length} said`);
+
+    // The moment there is a break it is said, and not before.
+    quiet = true;
+    tick(2_000);
+    check("it speaks at the first real break", said.length === 1, `${said.length} said`);
+
+    // A second one, straight away, is held for the full minute even though it is quiet.
+    holding.offer("Still waiting on the knowledge app, 41 minutes now.");
+    tick(30_000);
+    check("a second one waits out the minute", said.length === 1, `${said.length} said`);
+    tick(35_000);
+    check("and is said once the minute is up", said.length === 2, `${said.length} said`);
+
+    // Three arriving in a row while it is busy leave one to be said, the newest.
+    quiet = false;
+    holding.offer("one");
+    holding.offer("two");
+    holding.offer("three");
+    quiet = true;
+    tick(70_000);
+    check("only the newest survives the wait", said.length === 3 && said[2].text === "three", said[2]?.text ?? "none");
+
+    // Something nobody could ever be told is dropped rather than said long after.
+    quiet = false;
+    holding.offer("far too old by the time anybody is free");
+    tick(700_000);
+    quiet = true;
+    tick(70_000);
+    check("old news is dropped, not said late", said.length === 3, `${said.length} said`);
+
+    // And a question going off drops whatever was waiting behind it.
+    quiet = false;
+    holding.offer("about the moment just gone");
+    holding.forget();
+    quiet = true;
+    tick(120_000);
+    check("sending a question drops what was waiting", said.length === 3, `${said.length} said`);
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+}
+
 // The gate decides what ever reaches Claude, and getting it wrong means either a
 // machine that ignores you or one that acts on the radio. Same trick as above: the
 // part of the page that reads speech into instructions is lifted out and run here.
@@ -1715,6 +1812,7 @@ try {
   await checkItOnlyEndsItsOwn();
   checkConversationsAreLetGoOf();
   checkItKnowsItsOwnVoice();
+  checkAnnouncementsWaitForABreak();
   checkTheGuard();
   checkFillerComesOut();
   checkFinishedThoughts();
