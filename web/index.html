@@ -1756,6 +1756,83 @@ const sound = {
 };
 
 
+// ------------------------------------------- what it says on its own account, held back
+//
+// An answer was asked for. A reminder that something is still running was not: nobody
+// asked for it, nobody is waiting on it, and it is worth nothing at all if it costs the
+// sentence somebody was in the middle of saying.
+//
+// That is exactly what it cost. Words only reach this app at the pauses, so a sentence
+// still being spoken exists nowhere but in the ear that is hearing it — and everything
+// arriving while this app is talking is thrown away as its own voice off the windscreen.
+// So an announcement landing mid-sentence did not interrupt a sentence. It deleted one,
+// and the longer the sentence the more went with it.
+//
+// Nothing unasked-for goes out the moment it arrives, therefore. It waits for a real
+// break, and there is a floor under how often one can be heard at all however many
+// things produce them. It is on the screen either way — only the speaking waits.
+//
+// Deliberately not a rule about the reminder that exposed this. It is a rule about
+// anything this app says on its own account, because the next one will be shaped the
+// same way: news that something finished has identical manners and would do identical
+// damage.
+function heldBack({ ready, say, leastGap = 60_000, staleAfter = 10 * 60_000, now = () => Date.now() }) {
+  let waiting = null;   // the newest thing wanting to be said, or nothing
+  let arrived = 0;
+  // Nothing said yet, kept as nothing rather than as a time long ago. A clock that
+  // starts near zero would read a time long ago as "just now" and hold the very first
+  // one back for a minute for no reason — which is only ever obvious in a test, and is
+  // exactly the sort of thing a test is for.
+  let lastSaidAt = null;
+  let looking = null;
+
+  function look() {
+    looking = null;
+    if (waiting === null) return;
+
+    // Old news about a moment that has passed. Said late it is worse than silence: it
+    // describes a state of the world nobody is in any more.
+    if (now() - arrived > staleAfter) {
+      trace("dropped an announcement there was never a good moment for", waiting);
+      waiting = null;
+      return;
+    }
+
+    if ((lastSaidAt === null || now() - lastSaidAt >= leastGap) && ready()) {
+      const text = waiting;
+      waiting = null;
+      lastSaidAt = now();
+      say(text);
+      return;
+    }
+
+    looking = setTimeout(look, 1_000);
+  }
+
+  return {
+    // Only the newest survives the wait. Two of these are the same sentence with a
+    // different number in it, and hearing both in a row is the nagging this avoids
+    // everywhere else.
+    offer(text) {
+      const say = String(text ?? "").trim();
+      if (!say) return;
+      waiting = say;
+      arrived = now();
+      if (!looking) look();
+    },
+
+    // Something has taken over that makes whatever was waiting beside the point — a
+    // question going off, the drive ending. Dropped rather than delayed.
+    forget() {
+      waiting = null;
+      if (looking) { clearTimeout(looking); looking = null; }
+    },
+
+    get holding() { return waiting !== null; },
+  };
+}
+
+
 // ------------------------------------------------------------- the free front end
 
 function splitFrontEnd() {
@@ -1919,6 +1996,39 @@ function splitFrontEnd() {
   // timer that started before you had finished the sentence.
   let lastHeardAt = 0;
   let offering = false;
+
+  // True while the sentence in the air is one this app decided to say by itself. It
+  // changes who wins when somebody talks over it: an answer was asked for and is worth
+  // protecting from an echo, and a reminder nobody asked for is not worth a syllable of
+  // what somebody is saying.
+  let onItsOwnAccount = false;
+
+  // Everything unasked-for goes through here rather than straight to the voice.
+  const announcements = heldBack({
+    ready: () => {
+      if (heldOff) return false;                 // deliberately not listening, so not talking either
+      if (mouth?.busy || mouth?.settling) return false;
+      if (working) return false;                 // an answer is on its way and will say its own piece
+      if (waitingOn || offering) return false;   // it has asked something and is owed an answer
+      if (live) return false;                    // words arriving this second
+      if (reader.held()) return false;           // half of a phrase, waiting on the rest of it
+
+      // A real break, not the gap between two words. Longer when there is an unsent
+      // question on the screen, because that is somebody mid-thought with the sentence
+      // still in their head — the exact moment this used to destroy.
+      const quietFor = Date.now() - lastHeardAt;
+      const enough = question.length
+        ? (setup.quietBeforeAnnouncingMidQuestion ?? 20_000)
+        : (setup.quietBeforeAnnouncing ?? 5_000);
+      return quietFor >= enough;
+    },
+    say: (text) => {
+      onItsOwnAccount = true;
+      whenQuiet.push(() => { onItsOwnAccount = false; });
+      mouth?.speak(text);
+    },
+    leastGap: setup.leastGapBetweenAnnouncements ?? 60_000,
+  });
 
   function stopOffering() {
     if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
@@ -2111,6 +2221,10 @@ function splitFrontEnd() {
 
     sound.note("sent");
     trace("SENDING", asked);
+    // Anything waiting to be said on this app's own account was about the moment just
+    // gone. Asking something new is as clear a statement as there is that the moment
+    // has moved on, and whatever is still running will offer itself again shortly.
+    announcements.forget();
     lastEmptied = question;
     question = [];
     live = "";
@@ -2741,6 +2855,17 @@ function splitFrontEnd() {
       stopOffering();
       offering = false;
       mouth.silence();
+    } else if (mouth?.busy && onItsOwnAccount && !soundsLikeItself(text, mouth.saying)) {
+      // Same judgement, for the same reason, about the other thing it says without
+      // being asked. Holding these until a break makes this rare rather than
+      // impossible — a break can end the instant one starts — and when it does happen
+      // the person wins outright. Nothing said on this app's own account is worth the
+      // sentence somebody is in the middle of, and throwing those words away as an echo
+      // is not a smaller loss than interrupting: it is the whole sentence, because
+      // nothing of it had been written down yet.
+      trace("talked straight through an announcement", text);
+      onItsOwnAccount = false;
+      mouth.silence();
     } else if (mouth?.busy) {
       // While it is talking, nothing gets in unless you addressed it. Comparing words to
       // decide what was its own voice leaked both ways — its sentences landed in the
@@ -2838,12 +2963,14 @@ function splitFrontEnd() {
   }
 
   function fromClaude(kind, text) {
-    // Housekeeping said in plain words, and said whatever else is going on. It goes
-    // through the same one queue as everything else, so it lands after the answer that
-    // is still being read out rather than on top of it.
+    // Housekeeping: a reminder that something is still running, news that something
+    // finished. Nobody asked for any of it, so it is written to the screen now and
+    // spoken at the next real break rather than on top of whatever is going on. See
+    // the holding rule above for why saying it immediately was destructive rather than
+    // merely rude.
     if (kind === "notice") {
       log(text, "work");
-      mouth?.speak(text);
+      announcements.offer(text);
       return;
     }
     if (kind === "progress") {
@@ -3053,7 +3180,14 @@ function splitFrontEnd() {
           // The ear cannot simply be switched off instead: it has to stay open to hear
           // the one word that stops it. So it listens and says nothing.
           if (heldOff) return;   // held off means shown nothing, not just kept nothing
-          if (mouth?.busy && !wantsAttention(text)) return;
+          if (mouth?.busy && !wantsAttention(text)) {
+            // The exception is something it decided to say by itself, which anybody is
+            // entitled to talk straight over — those words are being kept, so hiding
+            // them would be the same lie the other way round. Only its own voice coming
+            // back is still hidden, since that is genuinely going nowhere.
+            const yours = onItsOwnAccount && !soundsLikeItself(text, mouth.saying);
+            if (!yours) return;
+          }
           live = text;
           lastHeardAt = Date.now();   // half-heard words are still you, still talking
           stopOffering();
@@ -3104,6 +3238,7 @@ function splitFrontEnd() {
     stop() {
       ears?.stop(); ears = null;
       mouth?.silence();
+      announcements.forget();
       results?.close(); results = null;
       stopWork();
       stopTicking();
@@ -3183,6 +3318,11 @@ function realtimeFrontEnd() {
   let micStream = null, reconnectTimer = null, attempt = 0, instructionsCache = null;
   let lastSpokeAt = 0;
   const PROGRESS_MIN_GAP_MS = 25_000;
+
+  // Enough of the state of the turn to know whether this is anybody's moment but ours.
+  let answering = false;    // the model is speaking
+  let talkingSince = 0;     // somebody started a sentence and has not finished it
+  let lastHeardAt = 0;      // when a sentence of theirs last ended
 
   // Every time you speak, the whole conversation so far is billed again, so a long
   // drive gets steadily more expensive. The voice model is only a mouthpiece —
@@ -3278,7 +3418,22 @@ function realtimeFrontEnd() {
         break;
       case "response.done":
         lastSpokeAt = Date.now();
+        answering = false;
         trimConversation(); // only between turns, never mid-sentence
+        break;
+      case "response.created":
+        answering = true;
+        break;
+      // Whether somebody is talking right now. Only tracked so that nothing this app
+      // decided to say by itself is put into the conversation mid-sentence: handing the
+      // model something to say while a turn is still being spoken cuts that turn off,
+      // and what was said up to then goes with it.
+      case "input_audio_buffer.speech_started":
+        talkingSince = Date.now();
+        break;
+      case "input_audio_buffer.speech_stopped":
+        talkingSince = 0;
+        lastHeardAt = Date.now();
         break;
       case "error":
         log(`voice error: ${JSON.stringify(event.error ?? event)}`, "bad");
@@ -3286,10 +3441,25 @@ function realtimeFrontEnd() {
     }
   }
 
+  // The same holding rule as the free front end, for the same reason. This model cuts
+  // a turn off the instant it is given something to say, and the words spoken up to
+  // that point go nowhere — so an unasked-for reminder landing mid-sentence costs the
+  // sentence here too.
+  const announcements = heldBack({
+    ready: () => {
+      if (!live) return false;
+      if (answering || talkingSince) return false;
+      return Date.now() - Math.max(lastHeardAt, lastSpokeAt) >= (setup.quietBeforeAnnouncing ?? 5_000);
+    },
+    say: (text) =>
+      speakThrough(`[Housekeeping, not from the user and not an answer: ${text} Say that briefly in your own words, then wait.]`),
+    leastGap: setup.leastGapBetweenAnnouncements ?? 60_000,
+  });
+
   function fromClaude(kind, text) {
     if (kind === "notice") {
       log(text, "work");
-      speakThrough(`[Housekeeping, not from the user and not an answer: ${text} Say that briefly in your own words, then wait.]`);
+      announcements.offer(text);
       return;
     }
     if (kind === "progress") {
@@ -3416,6 +3586,7 @@ function realtimeFrontEnd() {
     },
     stop() {
       live = false;
+      announcements.forget();
       clearTimeout(reconnectTimer); reconnectTimer = null;
       try { pc?.close(); } catch {}
       pc = null; dc = null;

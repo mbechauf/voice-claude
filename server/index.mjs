@@ -12,11 +12,14 @@ import {
   ANSWERS,
   ANSWER_WINDOW_MS,
   GATE,
+  LEAST_GAP_BETWEEN_ANNOUNCEMENTS_MS,
   LISTENER,
   MODE,
   OPEN_TIMEOUT_MS,
   PHRASES,
   PAUSE_MS,
+  QUIET_BEFORE_ANNOUNCING_MS,
+  QUIET_BEFORE_ANNOUNCING_MID_QUESTION_MS,
   READ_OUT_PAGE,
   PORT,
   EVERY_PROJECT_NAME,
@@ -763,6 +766,12 @@ async function handle(req, res) {
       page: pageStamp(),
       gate: GATE,
       pause: PAUSE_MS,
+      // When it is allowed to say something nobody asked for. The phone is the only
+      // thing that knows whether somebody is mid-sentence, so the judgement is made
+      // there; these are the numbers it makes it with.
+      quietBeforeAnnouncing: QUIET_BEFORE_ANNOUNCING_MS,
+      quietBeforeAnnouncingMidQuestion: QUIET_BEFORE_ANNOUNCING_MID_QUESTION_MS,
+      leastGapBetweenAnnouncements: LEAST_GAP_BETWEEN_ANNOUNCEMENTS_MS,
       phrases: PHRASES,
       // Who does the hearing. Decided here rather than on the phone, because this is
       // the machine that knows whether the ear is installed at all — and it can change

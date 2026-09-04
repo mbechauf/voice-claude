@@ -291,6 +291,32 @@ export const READ_OUT_PAGE = Number(process.env.VOICE_CLAUDE_PAGE ?? 2);
 // Only used when there is no gate. How long a silence means you have finished.
 export const PAUSE_MS = Number(process.env.VOICE_CLAUDE_PAUSE ?? 3_500);
 
+// ------------------------------- when it is allowed to say something nobody asked for
+//
+// Reminders that something is still running, and news that something has finished, are
+// the only things this app says off its own bat. They are worth hearing and they are
+// worth nothing at all if they cost the sentence somebody was in the middle of — words
+// reach this app only at the pauses, so a sentence still being spoken is not written
+// down anywhere yet and interrupting it deletes it.
+//
+// So each one waits for a break before it is spoken. It is on the screen immediately
+// either way; only the voice waits.
+
+// A break, when there is nothing half-said on the screen.
+export const QUIET_BEFORE_ANNOUNCING_MS = Number(process.env.VOICE_CLAUDE_QUIET_BEFORE_ANNOUNCING ?? 5_000);
+
+// A break, when there is an unsent question sitting there. Longer on purpose: that is
+// somebody mid-thought with the rest of the sentence still in their head, and a pause
+// in the middle of dictating is not an invitation.
+export const QUIET_BEFORE_ANNOUNCING_MID_QUESTION_MS =
+  Number(process.env.VOICE_CLAUDE_QUIET_BEFORE_ANNOUNCING_MID_QUESTION ?? 20_000);
+
+// And a floor under how often one can be heard at all, whatever produced it. Several
+// separate things can each have something to announce, and without this they queue up
+// behind one break and all arrive together.
+export const LEAST_GAP_BETWEEN_ANNOUNCEMENTS_MS =
+  Number(process.env.VOICE_CLAUDE_LEAST_GAP_BETWEEN_ANNOUNCEMENTS ?? 60_000);
+
 // How long the gate waits before giving up on a question you started and forgot
 // about. Zero means never, which is the default: nothing you did not finish
 // yourself is ever sent, and nothing you were still thinking about is ever thrown
