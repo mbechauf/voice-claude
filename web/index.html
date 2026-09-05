@@ -701,6 +701,32 @@ function recentlySpoken({ keep = 6, forMs = 12_000, now = () => Date.now() } = {
   };
 }
 
+// ------------------------------------------------------ letters with marks on them
+//
+// Dictation writes accents. This app used to throw them away — and worse, it replaced
+// them with a space rather than removing them, so an accented letter did not lose its
+// accent, it cut the word in half. "résumé" arrived as "r sum", "café" as "caf",
+// "Zürich" as "z rich". Nothing downstream could recover: the project named after one
+// of those words was unreachable by saying its name, and the same damage was in every
+// European name anybody might say out loud.
+//
+// So the mark comes off the letter and the letter stays. Pulling a letter apart into
+// its plain form and its mark, and then dropping the marks, covers nearly all of them
+// in one move. The few below are their own letters rather than a letter with a mark on
+// it, so that does nothing for them and they are spelled out by hand.
+const LETTERS_OF_THEIR_OWN = {
+  "ø": "o", "Ø": "O", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe", "ß": "ss",
+  "đ": "d", "Đ": "D", "ð": "d", "Ð": "D", "ł": "l", "Ł": "L", "þ": "th", "Þ": "Th",
+  "ı": "i", "ħ": "h", "ŧ": "t",
+};
+
+function plainLetters(text) {
+  return String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[øØæÆœŒßđĐðÐłŁþÞıħŧ]/g, (letter) => LETTERS_OF_THEIR_OWN[letter] ?? letter);
+}
+
 // Its own voice coming back is mostly its own words. Yours are not.
 // The one word that means "this is for you".
 //
@@ -722,7 +748,7 @@ function wantsAttention(heard) {
   // Matched by sound, not by spelling. Dictation writes "hay" about as often as "hey",
   // and they are the same word said out loud — an exact match failed silently every
   // time it guessed the other one, which looks exactly like the app ignoring you.
-  return String(heard)
+  return plainLetters(heard)
     .toLowerCase()
     .replace(/[^a-z0-9 ]/g, " ")
     .split(/\s+/)
@@ -730,7 +756,7 @@ function wantsAttention(heard) {
 }
 
 function meaningfulWords(text) {
-  return text.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
+  return plainLetters(text).toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
 }
 
 // Its own voice coming back is mostly its own words. Yours are not.
@@ -1154,7 +1180,7 @@ function phraseStartsAt(words, index, phrase) {
 }
 
 const plainWords = (text) =>
-  text.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
+  plainLetters(text).toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
 
 // Real speech is full of noise that carries no meaning: "um", "er", and the little
 // stalling phrases people say while they think. None of it belongs in a question,
@@ -1175,7 +1201,7 @@ const STALLS = [
 // Keeps the words as they were said — casing, punctuation and all — and only takes
 // things out, so what is left reads exactly as it was spoken.
 function withoutFiller(text) {
-  const bare = (token) => token.toLowerCase().replace(/[^a-z0-9']/g, "");
+  const bare = (token) => plainLetters(token).toLowerCase().replace(/[^a-z0-9']/g, "");
   let tokens = String(text ?? "").split(/\s+/).filter(Boolean);
 
   tokens = tokens.filter((token) => {
@@ -2526,7 +2552,7 @@ function splitFrontEnd() {
     // "a" as well as "the". Said out loud it is "switch to the knowledge app", and heard
     // it is as often "switch to a knowledge app" — dictation writes the little word it
     // thought it heard, and no name here ever begins with one.
-    const bare = (text) => text.toLowerCase().replace(/^(the|my|a|an)\s+/, "").trim();
+    const bare = (text) => plainLetters(text).toLowerCase().replace(/^(the|my|a|an)\s+/, "").trim();
     const spoken = bare(said);
     if (!spoken) return null;
 
