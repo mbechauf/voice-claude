@@ -111,8 +111,30 @@ const HESITATIONS = new Set([
   "a", "the", "is", "was", "it", "that", "and", "to", "my", "in",
 ]);
 
+// The same reduction to bare words the page does, and it has to agree with the page's
+// letter for letter — this is what decides whether a tidy-up invented a word. When the
+// two disagreed, a tidy-up that spelled a name properly looked like one that had made
+// the name up, and the repair was thrown away every time. The check proves they agree
+// rather than trusting it.
+//
+// An accented letter loses its mark and keeps its letter. It used to become a gap,
+// which split one word into two and was the whole of why saying "résumé" reached
+// nothing: the page wrote down "r sum".
+const LETTERS_OF_THEIR_OWN = {
+  "ø": "o", "Ø": "O", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe", "ß": "ss",
+  "đ": "d", "Đ": "D", "ð": "d", "Ð": "D", "ł": "l", "Ł": "L", "þ": "th", "Þ": "Th",
+  "ı": "i", "ħ": "h", "ŧ": "t",
+};
+
+export function plainLetters(text) {
+  return String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[øØæÆœŒßđĐðÐłŁþÞıħŧ]/g, (letter) => LETTERS_OF_THEIR_OWN[letter] ?? letter);
+}
+
 const plainWords = (text) =>
-  text
+  plainLetters(text)
     .toLowerCase()
     .replace(/[’']/g, "")
     .replace(/[^a-z0-9 ]+/g, " ")

@@ -9,7 +9,7 @@ import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { isInstalled as tidyUpInstalled, whatItMeant, whyNotToTrust } from "./cleanup.mjs";
+import { isInstalled as tidyUpInstalled, plainLetters, whatItMeant, whyNotToTrust } from "./cleanup.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, "..");
@@ -178,6 +178,17 @@ function checkConversationsAreLetGoOf() {
   }
 }
 
+// Taking the marks off letters is now underneath nearly everything that reads speech,
+// so several of the checks below need it carried across with whatever they are lifting
+// out of the page. Named once here rather than spelled out in each of them.
+function theLetterFolding(page) {
+  const parts = [
+    page.match(/const LETTERS_OF_THEIR_OWN = [\s\S]*?\n};/),
+    page.match(/function plainLetters[\s\S]*?\n}/),
+  ];
+  return parts.every(Boolean) ? parts.map((part) => part[0]).join("\n") : "";
+}
+
 // Whether it can tell your voice from its own is what decides if interrupting it
 // works or if it argues with itself all the way down the motorway. It lives in the
 // page, so it is lifted out of there and exercised here rather than only in a car.
@@ -191,7 +202,8 @@ function checkItKnowsItsOwnVoice() {
     return;
   }
 
-  const soundsLikeItself = new Function(`${words[0]}; ${source[0]}; return soundsLikeItself;`)();
+  const soundsLikeItself =
+    new Function(`${theLetterFolding(page)}; ${words[0]}; ${source[0]}; return soundsLikeItself;`)();
   const answer = "Another set of notes still says the adapter is the only copy of that file.";
 
   const cases = [
@@ -307,6 +319,72 @@ function checkAnnouncementsWaitForABreak() {
   }
 }
 
+// Dictation writes accents, and this app used to throw them away by replacing them with
+// a gap — so an accented letter did not lose its accent, it cut the word in half.
+// "Switch to the résumé app" was written down as "switch to the r sum app", which named
+// no project and reached nothing. Every European name anybody says out loud broke the
+// same way.
+//
+// Two copies of the same reduction exist, one in the page and one on the Mac, and they
+// have to agree letter for letter: the Mac's decides whether a tidy-up invented a word,
+// so a disagreement throws away every repair that spells a name properly. Both are run
+// here over the same words rather than trusted to have stayed in step.
+function checkAnAccentDoesNotSplitAWord({ projectNames, giveaways }) {
+  const page = fs.readFileSync(path.join(root, "web", "index.html"), "utf8");
+  const folding = theLetterFolding(page);
+  const words = page.match(/const plainWords = [\s\S]*?;\n/);
+  if (!folding || !words) {
+    check("an accent does not split a word in two", false, "couldn't find that part of the page");
+    return;
+  }
+  const inThePage = new Function(`${folding}\n${words[0]}; return { plainLetters, plainWords };`)();
+
+  const cases = [
+    ["the name that started this", "Switch to the résumé app", ["switch", "to", "the", "resume", "app"]],
+    ["a word with one mark on it", "Café tests", ["cafe", "tests"]],
+    ["a name with an umlaut", "Zürich", ["zurich"]],
+    ["two marks in one word", "naïve piñata", ["naive", "pinata"]],
+    ["a letter that is its own letter", "Søren's Straße", ["soren's", "strasse"]],
+    ["plain words are left alone", "check the tests", ["check", "the", "tests"]],
+  ];
+
+  for (const [name, said, expected] of cases) {
+    const got = inThePage.plainWords(said);
+    check(`${name}`, JSON.stringify(got) === JSON.stringify(expected), got.join(" "));
+  }
+
+  // And the Mac's copy agrees. Its own reduction drops apostrophes where the page keeps
+  // them, which is deliberate and not what is being compared — the letters are.
+  const together = cases.map(([, said]) => said).join(" ");
+  check(
+    "the page and the Mac take marks off letters the same way",
+    inThePage.plainLetters(together) === plainLetters(together),
+    `${inThePage.plainLetters(together)} | ${plainLetters(together)}`,
+  );
+
+  // The whole point of it: saying the name now reaches the project.
+  const source = page.match(/function projectAtTheFront[\s\S]*?\n  }/);
+  if (!source) {
+    check("saying an accented project name reaches that project", false, "couldn't find that part of the page");
+    return;
+  }
+  const nearly = page.match(/function nearlySame[\s\S]*?\n}/);
+  const sounds = page.match(/function howItSounds[\s\S]*?\n}/);
+  const projectAtTheFront = new Function(
+    "setup",
+    `${sounds[0]}\n${nearly[0]}\n${folding}\n${source[0].replace(/^  function/, "function")}\nreturn projectAtTheFront;`,
+  )({ projectNames, giveaways });
+
+  for (const said of ["the résumé app", "the resume app", "résumé builder"]) {
+    const found = projectAtTheFront(said);
+    check(
+      `"${said}" reaches the resume project`,
+      found?.project === "the resume builder",
+      found?.project ?? "nothing",
+    );
+  }
+}
+
 // The gate decides what ever reaches Claude, and getting it wrong means either a
 // machine that ignores you or one that acts on the radio. Same trick as above: the
 // part of the page that reads speech into instructions is lifted out and run here.
@@ -334,8 +412,9 @@ function checkTheGate(livePhrases) {
     return;
   }
 
-  const read = new Function(`${pieces.join("\n")}; return readAsInstructions;`)();
-  const makeReader = new Function(`${pieces.join("\n")}; return makePhraseReader;`)();
+  const folding = theLetterFolding(page);
+  const read = new Function(`${folding}\n${pieces.join("\n")}; return readAsInstructions;`)();
+  const makeReader = new Function(`${folding}\n${pieces.join("\n")}; return makePhraseReader;`)();
 
   const NAMED = { open: "claude go", close: "claude stop" };
   // These made-up phrases exercise the matching itself — words misheard, phrases split
@@ -511,7 +590,7 @@ function checkFillerComesOut() {
     return;
   }
 
-  const strip = new Function(`${parts.join("\n")}; return withoutFiller;`)();
+  const strip = new Function(`${theLetterFolding(page)}\n${parts.join("\n")}; return withoutFiller;`)();
 
   const cases = [
     ["a noise in the middle", "check the um tests", "check the tests"],
@@ -552,7 +631,7 @@ function checkFinishedThoughts() {
     return;
   }
 
-  const finished = new Function(`${parts.join("\n")}; return soundsFinished;`)();
+  const finished = new Function(`${theLetterFolding(page)}\n${parts.join("\n")}; return soundsFinished;`)();
 
   const cases = [
     ["a plain question", "what changed in the last commit", true],
@@ -654,7 +733,7 @@ function checkFinishedThoughts() {
     check("the page can be read for what counts as a few words", false);
     return;
   }
-  const aFew = new Function(`${parts.join("\n")}; ${few[0]}; return justAFewWords;`)();
+  const aFew = new Function(`${theLetterFolding(page)}\n${parts.join("\n")}; ${few[0]}; return justAFewWords;`)();
   const lengths = [
     ["a three-word instruction", "run the tests", true],
     ["filler does not make it long", "um so run the tests", true],
@@ -762,7 +841,7 @@ function checkPickingAProject(names) {
 
   const pick = new Function(
     "setup",
-    `${helpers}\n${source[0].replace(/^  /gm, "")}; return projectAtTheFront;`,
+    `${helpers}\n${theLetterFolding(page)}\n${source[0].replace(/^  /gm, "")}; return projectAtTheFront;`,
   )(names);
 
   const shape = (said) => {
@@ -1288,7 +1367,9 @@ async function checkOneVoice() {
     return;
   }
   const build = (extra = "") =>
-    new Function(`const trace = () => {}; ${parts.map((p) => p[0]).join("\n")}; ${extra}`);
+    new Function(
+      `const trace = () => {}; ${theLetterFolding(page)}\n${parts.map((p) => p[0]).join("\n")}; ${extra}`,
+    );
 
   // A mouth that makes no noise but is honest about when it stopped.
   const pretendMouth = () => {
@@ -1813,6 +1894,7 @@ try {
   checkConversationsAreLetGoOf();
   checkItKnowsItsOwnVoice();
   checkAnnouncementsWaitForABreak();
+  checkAnAccentDoesNotSplitAWord({ projectNames: setup.projectNames, giveaways: setup.giveaways });
   checkTheGuard();
   checkFillerComesOut();
   checkFinishedThoughts();

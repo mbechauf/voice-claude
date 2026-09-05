@@ -44,7 +44,12 @@ export const PROJECTS = {
   },
   "the resume builder": {
     at: path.join(CODE, "resume_builder"),
-    alsoCalled: ["resume", "the resume", "resume builder", "the cv builder"],
+    // "the resume app" is what it actually gets called out loud, and dictation writes
+    // it with its accents on — which is the spelling this app now reads properly.
+    alsoCalled: [
+      "resume", "the resume", "resume builder", "the cv builder",
+      "resume app", "the resume app",
+    ],
   },
   "the financial overview": {
     at: path.join(CODE, "financial-overview"),
